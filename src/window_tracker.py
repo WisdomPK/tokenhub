@@ -37,6 +37,8 @@ _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _MONITOR_DEFAULTTONEAREST = 2
+_TH32CS_SNAPPROCESS = 0x00000002
+_GA_ROOT = 2
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -50,6 +52,23 @@ class _MONITORINFO(ctypes.Structure):
         ("rcMonitor", wintypes.RECT),
         ("rcWork", wintypes.RECT),
         ("dwFlags", wintypes.DWORD),
+    ]
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    """PROCESSENTRY32W（进程枚举；th32DefaultHeapID 为 ULONG_PTR，用 c_size_t 防截断）。"""
+
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
     ]
 
 
@@ -103,6 +122,25 @@ _kernel32.QueryFullProcessImageNameW.argtypes = [
     wintypes.LPWSTR,
     ctypes.POINTER(wintypes.DWORD),
 ]
+
+# 热区"鼠标下方必须是 opencode 窗口"校验（HWND=c_void_p，防 64 位截断）
+_user32.WindowFromPoint.restype = wintypes.HWND
+_user32.WindowFromPoint.argtypes = [wintypes.POINT]
+
+_user32.GetAncestor.restype = wintypes.HWND
+_user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+
+# 进程枚举（CreateToolhelp32Snapshot；argtypes 在 _PROCESSENTRY32W 定义后补齐见下）
+_kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+_kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+
+_kernel32.Process32FirstW.restype = wintypes.BOOL
+_kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+
+_kernel32.Process32NextW.restype = wintypes.BOOL
+_kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+
+_INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
 
 def set_dpi_awareness() -> None:
@@ -168,9 +206,11 @@ class WindowTracker:
     # -- discovery ----------------------------------------------------------
 
     def find_opencode_window(self) -> int | None:
-        """Return the hwnd of the largest visible window owned by PROCESS_NAME.
+        """Return the hwnd of the largest visible, non-minimized window owned by PROCESS_NAME.
 
-        Enumerates top-level windows, keeps those that are visible and whose
+        Enumerates top-level windows, keeps those that are visible, NOT
+        minimized (IsIconic; a minimized window must not be tracked — its
+        rect is off-screen and its hotzone must not respond), and whose
         process image name matches PROCESS_NAME (case-insensitive), and
         returns the one with the largest area (multi-window processes, e.g.
         hidden splash + main window, resolve to the main window).
@@ -184,6 +224,8 @@ class WindowTracker:
             try:
                 if not _user32.IsWindowVisible(hwnd):
                     return True
+                if _user32.IsIconic(hwnd):
+                    return True  # 最小化窗口不匹配（热区必须失效）
                 pid = self._pid_of(hwnd)
                 if pid is None or not self._pid_matches_name(pid):
                     return True
@@ -216,6 +258,56 @@ class WindowTracker:
                 and _user32.IsWindowVisible(h)
                 and not _user32.IsIconic(h)
             )
+        except Exception:
+            return False
+
+    def is_opencode_running(self) -> bool:
+        """True if a PROCESS_NAME process (case-insensitive) currently exists.
+
+        用 CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS) 枚举进程名判断——
+        最小化/隐藏窗口不影响该判定（用于"进程在运行就不落屏幕顶边回退"）。
+        Never raises; returns False on any failure.
+        """
+        snapshot = None
+        try:
+            snapshot = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+            if (not snapshot or snapshot == _INVALID_HANDLE_VALUE
+                    or snapshot == -1):
+                return False
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            target = PROCESS_NAME.lower()
+            ok = _kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while ok:
+                if entry.szExeFile.lower() == target:
+                    return True
+                ok = _kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+            return False
+        except Exception:
+            return False
+        finally:
+            try:
+                if snapshot:
+                    _kernel32.CloseHandle(snapshot)
+            except Exception:
+                pass
+
+    def is_point_over_window(self, hwnd: int, x: int, y: int) -> bool:
+        """True when the top-level window under point (x, y) is `hwnd`.
+
+        WindowFromPoint 会跳过不可见/透明窗口（热区只在鼠标下方确实是
+        opencode 窗口时有效）；GetAncestor(GA_ROOT) 把子窗口归一到顶层
+        窗口后比较。HWND 走 wintypes.HWND（c_void_p），防 64 位截断。
+        Never raises; returns False on failure.
+        """
+        try:
+            under = _user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+            if not under:
+                return False
+            root = _user32.GetAncestor(under, _GA_ROOT)
+            if not root:
+                return False
+            return int(root) == int(hwnd)
         except Exception:
             return False
 

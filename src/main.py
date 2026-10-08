@@ -6,10 +6,12 @@ settings_window/help_window/tray）的模块；这些模块未就绪时允许 im
 集成后复测（py_compile 只做语法检查，不解析 import）。
 
 状态机（每 100ms tick，plan Task A 硬性规格）：
-  1. 窗口查找（失效重找，节流 1s）
-  2. 有窗口：bar_geometry 计算位置 → update_position；热区/面板内判定 → should_show
-  3. 无窗口且 fallback_screen_edge：屏幕顶边回退模式（yv=0，yh=-height）
-  4. 无窗口且不回退：隐藏
+  1. 窗口查找（失效窗口立即视为无窗口；重找节流 1s；最小化不匹配）
+  2. 有窗口：bar_geometry 计算位置 → update_position；热区（须位于 opencode
+     窗口上方，WindowFromPoint 校验）/面板内判定 → should_show
+  3. 无窗口且 fallback_screen_edge 且 opencode 进程未运行：屏幕顶边回退模式
+     （yv=0，yh=-height）；仅最小化时不回退
+  4. 无窗口其余情况：隐藏（手动显示/弹窗打开期间保持）
 """
 
 import os
@@ -199,13 +201,17 @@ class TokenHubApp:
 
     def _update_position_and_visibility(self):
         hwnd = self._hwnd
-        if hwnd is None or not self.tracker.is_valid(hwnd):
+        if hwnd is not None and not self.tracker.is_valid(hwnd):
+            # 缓存窗口失效（含最小化）：立即视为无窗口，不再用失效窗口走正常分支
+            self._hwnd = None
+            hwnd = None
+        if hwnd is None:
             now = time.monotonic()
             if now - self._last_find >= 1.0:  # 失效重找，节流 1s
                 self._last_find = now
                 self._hwnd = self.tracker.find_opencode_window()
                 hwnd = self._hwnd
-        if hwnd is not None:
+        if hwnd is not None and self.tracker.is_valid(hwnd):
             rect = self.tracker.get_rect(hwnd)
             if rect is None:
                 self._apply_visibility(self._manual_visible)
@@ -218,13 +224,15 @@ class TokenHubApp:
             # 隐藏位 = 所在显示器工作区上缘上方（work_area.top - bar_h，由 window_tracker.bar_geometry 计算）
             _, yh = self.tracker.bar_geometry(rect, self.win.width, self.win.height, False)
             self.win.update_position(x, yv, yh)
+            # 热区必须位于 opencode 窗口之上（鼠标下方确实是该窗口才响应）：
+            # 其他应用（或最小化残留坐标）盖在热区位置时不唤出
             in_hot = self.tracker.in_hotzone(
                 rect,
                 int(self.cfg.settings["hotzone_height"]),
                 float(self.cfg.settings["hotzone_width_ratio"]),
                 mx, my,
                 offset=offset,
-            )
+            ) and self.tracker.is_point_over_window(hwnd, mx, my)
             # TH-09：隐藏时面板区域不参与唤出；已显示时用面板区域保持显示
             inside = (
                 self.win.is_visible()
@@ -234,11 +242,13 @@ class TokenHubApp:
             # 可见状态统一：手动显示模式（托盘）/弹窗打开期间（is_modal_open）保持显示
             modal = self.win.is_modal_open()
             self._apply_visibility(in_hot or inside or self._manual_visible or modal)
-        elif self.cfg.settings.get("fallback_screen_edge", True):
+        elif (self.cfg.settings.get("fallback_screen_edge", True)
+              and not self.tracker.is_opencode_running()):
+            # 仅当 opencode 进程未运行才顶边回退；仅最小化（进程在运行）不回退
             self._fallback_screen_edge()
         else:
-            # 弹窗打开期间保持显示（无窗口且不回退）
-            self._apply_visibility(self.win.is_modal_open())
+            # 无窗口：隐藏；手动显示/弹窗打开期间保持
+            self._apply_visibility(self._manual_visible or self.win.is_modal_open())
 
     def _fallback_screen_edge(self):
         """无窗口回退：屏幕顶边 10px、居中 720px 热区；面板 yv=0、yh=-height。"""

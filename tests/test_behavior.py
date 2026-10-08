@@ -188,6 +188,8 @@ class ManualVisibilityTests(unittest.TestCase):
         }
         app.tracker = mock.Mock()
         app.tracker.is_valid.return_value = True
+        app.tracker.is_point_over_window.return_value = True   # 鼠标下方是 opencode 窗口
+        app.tracker.is_opencode_running.return_value = False   # 进程未运行（回退可用）
         app.tracker.get_rect.return_value = mock.Mock(
             left=100, top=100, right=900, bottom=700, center_x=lambda: 500)
         app.tracker.get_cursor_pos.return_value = (500, 400)  # 不在热区、面板外
@@ -243,6 +245,8 @@ class ModalVisibilityTests(unittest.TestCase):
         }
         app.tracker = mock.Mock()
         app.tracker.is_valid.return_value = True
+        app.tracker.is_point_over_window.return_value = True   # 鼠标下方是 opencode 窗口
+        app.tracker.is_opencode_running.return_value = False   # 进程未运行（回退可用）
         app.tracker.get_rect.return_value = mock.Mock(
             left=100, top=100, right=900, bottom=700, center_x=lambda: 500)
         app.tracker.get_cursor_pos.return_value = (500, 400)  # 不在热区、面板外
@@ -302,6 +306,96 @@ class ModalVisibilityTests(unittest.TestCase):
         app.cfg.settings['fallback_screen_edge'] = False
         app._update_position_and_visibility()
         self.assertTrue(app._visible)
+
+
+class MinimizedWindowTests(unittest.TestCase):
+    """最小化场景：失效窗口立即视为无窗口；进程在运行时不落顶边回退；
+    热区必须位于 opencode 窗口之上。"""
+
+    def _app(self):
+        app = _bare_app()
+        app.win = mock.Mock()
+        app.win.is_modal_open.return_value = False
+        app.win.is_visible.return_value = False
+        app.win.width = 620
+        app.win.height = 70
+        app.cfg = mock.Mock()
+        app.cfg.settings = {
+            'hotzone_offset': 48, 'hotzone_height': 10,
+            'hotzone_width_ratio': 0.5, 'fallback_screen_edge': True,
+        }
+        app.tracker = mock.Mock()
+        app.tracker.is_valid.return_value = True
+        app.tracker.is_point_over_window.return_value = True
+        app.tracker.is_opencode_running.return_value = False
+        app.tracker.get_rect.return_value = mock.Mock(
+            left=100, top=100, right=900, bottom=700, center_x=lambda: 500)
+        app.tracker.get_cursor_pos.return_value = (500, 400)  # 不在热区、面板外
+        app.tracker.in_hotzone.return_value = False
+        app.tracker.bar_geometry.side_effect = (
+            lambda rect, w, h, visible, *a, **k: (400, 100 if visible else -46))
+        app._hwnd = 12345
+        app._last_find = time.monotonic()
+        return app
+
+    def test_minimized_window_hides_and_skips_fallback(self):
+        """① 窗口失效（最小化）+ opencode 进程在运行 → 不显示、不走顶边回退。"""
+        app = self._app()
+        app.tracker.is_valid.return_value = False      # IsIconic → 失效
+        app.tracker.is_opencode_running.return_value = True
+        app.tracker.find_opencode_window.return_value = None
+        app._fallback_screen_edge = mock.Mock()
+        app._update_position_and_visibility()
+        self.assertIsNone(app._hwnd)                   # 失效窗口立即视为无窗口
+        self.assertFalse(app._visible)
+        app._fallback_screen_edge.assert_not_called()  # 最小化不退化为顶边回退
+
+    def test_not_running_falls_back_screen_edge(self):
+        """② opencode 未运行 + fallback 开 → 顶边回退照常（顶边热区可唤出）。"""
+        app = self._app()
+        app._hwnd = None
+        app.tracker.find_opencode_window.return_value = None
+        app.tracker.is_opencode_running.return_value = False
+        app.root = mock.Mock()
+        app.root.winfo_screenwidth.return_value = 1920
+        app.tracker.get_cursor_pos.return_value = (960, 5)  # 屏幕顶边中央热区
+        app._update_position_and_visibility()
+        app.win.update_position.assert_called_with(650, 0, -70)  # 回退路径已执行
+        self.assertTrue(app._visible)
+
+    def test_hotzone_requires_point_over_opencode(self):
+        """③ 热区条内但鼠标下方不是 opencode 窗口 → 不唤出；是 → 唤出。"""
+        app = self._app()
+        app.tracker.in_hotzone.return_value = True
+        app.tracker.is_point_over_window.return_value = False
+        app._update_position_and_visibility()
+        self.assertFalse(app._visible)                 # 被其他窗口遮挡 → 不响应
+        app.tracker.is_point_over_window.return_value = True
+        app._update_position_and_visibility()
+        self.assertTrue(app._visible)                  # 鼠标下方是 opencode → 响应
+
+    def test_visible_panel_stays_when_point_check_fails_but_inside(self):
+        """④ 面板已可见：point 校验 False 但鼠标在面板矩形内 → inside 兜底保持。"""
+        app = self._app()
+        app._visible = True
+        app.win.is_visible.return_value = True
+        app.tracker.in_hotzone.return_value = False
+        app.tracker.is_point_over_window.return_value = False
+        app.tracker.get_cursor_pos.return_value = (450, 120)  # 面板矩形内
+        app._update_position_and_visibility()
+        self.assertTrue(app._visible)
+        app.win.set_visible.assert_not_called()        # 状态无变化（未误收起）
+
+    def test_manual_mode_keeps_panel_when_no_window_no_fallback(self):
+        """手动显示/弹窗保持语义在无窗口分支保留（含仅最小化场景）。"""
+        app = self._app()
+        app._hwnd = None
+        app.tracker.find_opencode_window.return_value = None
+        app.tracker.is_opencode_running.return_value = True  # 仅最小化
+        app._manual_visible = True
+        app._update_position_and_visibility()
+        self.assertTrue(app._visible)                  # 手动模式不被误收起
+        app.win.set_visible.assert_called_with(True)
 
 
 # ---------------------------------------------------------------------------
