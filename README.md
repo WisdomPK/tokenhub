@@ -1,5 +1,8 @@
 # TokenHub v3
 
+> **分支说明** · 本分支（`dsh`）面向 **DeepSeek Harness**，插件与文档在 [`dsh-tokenhub/`](dsh-tokenhub/)。
+> 下文是 **opencode 桌面版** 的 TokenHub v3，作为同源实现保留在同一分支供参照；opencode 版默认在 [`main`](https://github.com/WisdomPK/tokenhub/tree/main) 分支。
+
 在 opencode 桌面版窗口顶部提供一个"额度条"：鼠标悬停窗口顶部往下约 48px（会话标签行下方）的 10px 细条时，从顶边下滑唤出，显示当前 opencode-go 订阅账号的 5小时/每周/每月额度使用情况与重置倒计时，并列出备用账号及其额度，支持一键切换账号（角色互换）。
 
 - 形态：独立 Python/tkinter 置顶无边框小窗（可脱离 opencode 独立运行）+ opencode 插件（随 opencode 启停自动拉起/回收）

@@ -1,0 +1,4 @@
+# dsh-tokenhub 插件行（bundles 机制：profile 的 dsh.profile.bundles 引入本包后自动合并此 patch）
+- insert:
+    - id: tokenhub
+      name: dsh-tokenhub
