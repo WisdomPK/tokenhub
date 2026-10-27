@@ -33,6 +33,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 
 const VERSION = "3.0.0";
@@ -77,7 +78,8 @@ function resolveExePath(): string | null {
     process.env.LOCALAPPDATA
       ? join(process.env.LOCALAPPDATA, "TokenHub", "TokenHub.exe")
       : undefined,
-    "C:\\Study\\opencode\\tokenhub-v3\\dist\\TokenHub.exe",
+    // 开发目录：插件直接从仓库加载时，取仓库根的 dist/TokenHub.exe
+    fileURLToPath(new URL("../dist/TokenHub.exe", import.meta.url)),
   ];
   for (const c of candidates) {
     if (!c) continue;

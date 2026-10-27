@@ -65,7 +65,7 @@ class _FakeValidator:
 
 def _build_demo_data():
     now = datetime.datetime.now(datetime.timezone.utc)
-    current = _Account('主账号', 'sk-T3tXXXXXXXXXXXXXXXXXXXXabcd')
+    current = _Account('主账号', 'sk-AbCXXXXXXXXXXXXXXXXXXXXwxyz')
     current_usage = _Usage(
         _Metric(1, (now + datetime.timedelta(hours=4, minutes=59)).isoformat()),
         _Metric(0, (now + datetime.timedelta(days=6)).isoformat()),

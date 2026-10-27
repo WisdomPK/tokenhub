@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const tmp = mkdtempSync(join(tmpdir(), "tokenhub-smoke-"));
 const authPath = join(tmp, "auth.json");
@@ -158,7 +158,7 @@ assert.equal(stillUp, false, "dispose 后控制端口应不可再连");
 // 6. TH-06 EXE 路径顺序：TOKENHUB_EXE → 正式安装目录 → 开发目录
 const resolveExe = hooks._tokenhubResolveExe;
 assert.equal(typeof resolveExe, "function", "hooks 应暴露 _tokenhubResolveExe");
-const devExe = "C:\\Study\\opencode\\tokenhub-v3\\dist\\TokenHub.exe";
+const devExe = fileURLToPath(new URL("../dist/TokenHub.exe", import.meta.url));
 // 6a. TOKENHUB_EXE 显式覆盖最优先
 const fakeExplicit = join(tmp, "explicit.exe");
 writeFileSync(fakeExplicit, "");

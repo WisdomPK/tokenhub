@@ -10,7 +10,7 @@
 
 ### 一键安装（推荐）
 
-1. 确认已构建：项目根运行 `python build.py`（或 `C:\Users\hushangq\.local\bin\python3.13.exe build.py`），产物为 `dist\TokenHub.exe`。
+1. 确认已构建：项目根运行 `python build.py`，产物为 `dist\TokenHub.exe`。
    （**本仓库已附带构建好的 `dist\TokenHub.exe`，可跳过本步直接执行第 2 步**。）
 2. 运行安装脚本：
 

@@ -186,7 +186,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_mask_key(self):
         # 统一规则：oc_sk_ 长 key（≥16）→ 前8+…+后4；sk- 长 key → 前6+…+后4；短 key → ***
-        self.assertEqual(Config.mask_key("sk-T3tXXXXXXXXXXXXXXXXXabcd"), "sk-T3t…abcd")
+        self.assertEqual(Config.mask_key("sk-AbCXXXXXXXXXXXXXXXXXXwxyz"), "sk-AbC…wxyz")
         self.assertEqual(Config.mask_key("oc_sk_ABCDEFGHIJKLMNOPQRSTUVwxYZ"), "oc_sk_AB…wxYZ")
         self.assertEqual(Config.mask_key("oc_sk_abcdefghij"), "oc_sk_ab…ghij")
         # oc_sk_ 前缀但长度 <16 → 走通用规则（≥12 → 前6+…+后4）
@@ -364,7 +364,7 @@ class ApiTests(unittest.TestCase):
         client = ApiClient()
         recorder = []
         with self._patch_urlopen(200, self.F1_JSON, recorder=recorder):
-            usage = client.fetch_usage("sk-T3t-test-key-0001")
+            usage = client.fetch_usage("sk-AbC-test-key-0001")
         self.assertEqual(usage.rolling.percent, 1)
         self.assertEqual(usage.weekly.percent, 0)
         self.assertEqual(usage.monthly.percent, 0)
@@ -374,7 +374,7 @@ class ApiTests(unittest.TestCase):
         self.assertIsNotNone(usage.fetched_at)
         # 请求头携带 Bearer
         self.assertEqual(len(recorder), 1)
-        self.assertEqual(recorder[0].get_header("Authorization"), "Bearer sk-T3t-test-key-0001")
+        self.assertEqual(recorder[0].get_header("Authorization"), "Bearer sk-AbC-test-key-0001")
 
     def test_api_parse_errors(self):
         client = ApiClient()
