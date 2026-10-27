@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 Or use dsh's own plugin command, which also writes the profile's dependency and bundle list:
 
 ```powershell
-dsh plugin --profile web add link:E:/AIWork/dsh/dsh-tokenhub
+dsh plugin --profile web add link:<path-to-dsh-tokenhub>
 ```
 
 > ⚠️ **Use `link:`, never `file:`.** pnpm **copies** a `file:` dependency into `node_modules`, so dsh reads a snapshot taken at install time — later source edits never reach it, **not even across a restart**, because the restart reads the same copy. `link:` symlinks instead, making your working tree the install location.

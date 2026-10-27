@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 或者直接用 dsh 自己的插件命令（会自动写入 profile 的依赖与 bundles 列表）：
 
 ```powershell
-dsh plugin --profile web add link:E:/AIWork/dsh/dsh-tokenhub
+dsh plugin --profile web add link:<path-to-dsh-tokenhub>
 ```
 
 > ⚠️ **必须用 `link:`，不能用 `file:`。** pnpm 会把 `file:` 依赖**拷贝**进 `node_modules`，dsh 读的是安装那一刻的快照——之后你改的源码永远不会生效，**连重启都没用**（重启后读的还是那份副本）。`link:` 建软链，工作目录就是安装位置。
