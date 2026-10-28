@@ -13,6 +13,8 @@ import winreg
 class ThemeManager:
     """Windows 主题检测与配色。"""
 
+    CHOICES = ('auto', 'light', 'dark')
+
     DARK = {
         'bg': '#1c1d21',          # 面板底色
         'fg': '#e9eaee',          # 主文字
@@ -50,7 +52,7 @@ class ThemeManager:
     }
 
     def __init__(self, choice: str = 'auto'):
-        self._choice = choice if choice in ('auto', 'light', 'dark') else 'auto'
+        self._choice = choice if choice in self.CHOICES else 'auto'
         self._colors = self._resolve()
 
     # ---- 主题解析 ----
@@ -64,7 +66,7 @@ class ThemeManager:
 
     def set_theme(self, choice: str) -> None:
         """切换主题（auto/light/dark），无效值忽略。"""
-        if choice not in ('auto', 'light', 'dark'):
+        if choice not in self.CHOICES:
             return
         self._choice = choice
         self._colors = self._resolve()
