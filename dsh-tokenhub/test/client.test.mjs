@@ -132,9 +132,13 @@ try {
   check('the dialogs keep their own size', rule('.th-modal').indexOf('scale(') === -1, rule('.th-modal'))
   check(
     'but the panel still steps aside by the gauge scaled width',
-    rule('.th-panel').indexOf('calc(18px + 34px * var(--th-scale,1))') !== -1,
+    rule('.th-panel').indexOf('calc(16px + 34px * var(--th-scale,1))') !== -1,
     rule('.th-panel'),
   )
+  check('the gauge sits in the lower fifth, not mid-page', rule('.th-gauge').indexOf('top:80%') !== -1, rule('.th-gauge'))
+  check('the gauge hugs the right edge', rule('.th-gauge').indexOf('right:8px') !== -1, rule('.th-gauge'))
+  check('the panel hangs off the gauge centre line', rule('.th-panel').indexOf('bottom:20vh') !== -1, rule('.th-panel'))
+  check('the panel is no longer centred with a translate', rule('.th-panel').indexOf('translateY') === -1, rule('.th-panel'))
   check('the gauge is three stacked tracks, one per window', all(host, '.th-gauge-row').length === 3, String(all(host, '.th-gauge-row').length))
   check(
     'bars run top to bottom: rolling, weekly, monthly',

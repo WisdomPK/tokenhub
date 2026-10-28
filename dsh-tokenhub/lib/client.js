@@ -8,7 +8,7 @@
  * Ported from TokenHub v3 (opencode desktop quota bar, WisdomPK/tokenhub).
  * TokenHub summoned its bar from a 10px hot zone at the opencode window edge,
  * which has no equivalent in a browser; the frame's floating layer plays that
- * role here, with a persistent ball whose badge shows the worst window.
+ * role here, with a persistent ball whose three bars show the three windows.
  */
 
 window.__ModuleLoader__.load({
@@ -25,70 +25,74 @@ window.__ModuleLoader__.load({
     const SNAPSHOT = '/plugins/dsh-tokenhub/snapshot'
     const SWITCH = '/plugins/dsh-tokenhub/switch'
     const ACCOUNT = '/plugins/dsh-tokenhub/account'
+
     /** Local poll; the Host refreshes on the same cadence. */
     const POLL_MS = 60000
+
     /** Window order, matching TokenHub's three metric blocks. Labels and short
      *  tags live in the dictionaries so neither language borrows the other's. */
     const WINDOWS = ['rolling', 'weekly', 'monthly']
+
+    /** Used only until the Host sends its own bands. */
+    const FALLBACK_THRESHOLDS = { warn: 60, error: 85 }
+
     const zh = {
-      title: 'OpenCode Go \u989d\u5ea6',
-      updated: '\u66f4\u65b0\u4e8e',
-      refresh: '\u5237\u65b0',
-      collapse: '\u6536\u8d77',
-      loading: '\u52a0\u8f7d\u4e2d\u2026',
-      loadFailed: '\u5feb\u7167\u62c9\u53d6\u5931\u8d25',
-      noKeys: '\u672a\u914d\u7f6e opencode-go \u5bc6\u94a5\uff08\u51ed\u636e\u91cc\u65e2\u65e0 OPENCODE_GO_KEY_* \u4e5f\u65e0 OPENCODE_GO_API_KEY\uff09',
-      noEntries: '\u672a\u53d1\u73b0\u8d26\u53f7',
-      inUse: '\u4f7f\u7528\u4e2d',
-      notInPool: '\u672a\u5165\u6c60',
-      w: { rolling: '5\u5c0f\u65f6', weekly: '\u5468', monthly: '\u6708' },
-      currentKey: '\u5f53\u524d\u5bc6\u94a5',
-      join: '\u52a0\u5165\u6c60',
-      joinTitle: '\u628a\u5f53\u524d\u5bc6\u94a5\u52a0\u5165\u8d26\u53f7\u6c60',
-      joinHint: '\u5165\u6c60\u540e\u5b83\u4f1a\u4f5c\u4e3a\u4e00\u6761\u5907\u7528\u8d26\u53f7\u7559\u5728\u5217\u8868\u91cc\uff0c\u5207\u6362\u8d70\u4e4b\u540e\u4e5f\u8fd8\u80fd\u5207\u56de\u6765\u3002',
-      joinCta: '\u52a0\u5165',
-      rename: '\u6539\u540d',
-      renameTitle: '\u91cd\u547d\u540d\u8d26\u53f7',
-      renameLabel: '\u65b0\u8d26\u53f7\u540d',
-      renameCta: '\u4fdd\u5b58',
-      renameHint: '\u53ea\u6539\u540d\u5b57\uff1a\u5bc6\u94a5\u4e0d\u52a8\uff0c\u300c\u5f53\u524d\u751f\u6548\u300d\u72b6\u6001\u4e5f\u4e0d\u53d8\u3002',
-      noActive: '\u5f53\u524d\u6ca1\u6709\u751f\u6548\u7684\u5bc6\u94a5',
-      day: '\u5929',
-      add: '\u65b0\u589e',
-      switch: '\u5207\u6362',
-      switching: '\u5207\u6362\u4e2d\u2026',
-      remove: '\u5220\u9664',
-      cancel: '\u53d6\u6d88',
-      confirm: '\u786e\u8ba4',
-      ok: '\u786e\u5b9a',
-      offline: '\u79bb\u5c94',
-      noData: '\u6570\u636e\u4e0d\u53ef\u7528',
-      reset: '\u5373\u5c06\u91cd\u7f6e',
-      unauthorized: '\u5bc6\u94a5\u65e0\u6548',
-      limited: '\u5df2\u9650\u6d41',
-      addTitle: '\u65b0\u589e\u8d26\u53f7',
-      addName: '\u8d26\u53f7\u540d\uff08\u53ef\u7559\u7a7a\uff0c\u81ea\u52a8\u547d\u540d\uff09',
+      title: 'OpenCode Go 额度',
+      updated: '更新于',
+      refresh: '刷新',
+      collapse: '收起',
+      loading: '加载中…',
+      loadFailed: '快照拉取失败',
+      noKeys: '未配置 opencode-go 密钥（凭据里既无 OPENCODE_GO_API_KEY 也无 OPENCODE_GO_KEY_*）',
+      noEntries: '未发现账号',
+      inUse: '使用中',
+      notInPool: '未入池',
+      w: { rolling: '5小时', weekly: '周', monthly: '月' },
+      currentKey: '当前密钥',
+      join: '加入池',
+      joinTitle: '把当前密钥加入账号池',
+      joinHint: '入池后它会作为一条备用账号留在列表里，切换走之后也还能切回来。',
+      joinCta: '加入',
+      rename: '改名',
+      renameTitle: '重命名账号',
+      renameLabel: '新账号名',
+      renameCta: '保存',
+      renameHint: '只改名字：密钥不动，「当前生效」状态也不变。',
+      noActive: '当前没有生效的密钥',
+      day: '天',
+      add: '新增',
+      switch: '切换',
+      switching: '切换中…',
+      remove: '删除',
+      cancel: '取消',
+      confirm: '确认',
+      ok: '确定',
+      offline: '离岔',
+      noData: '数据不可用',
+      reset: '即将重置',
+      addTitle: '新增账号',
+      addName: '账号名（可留空，自动命名）',
       addKey: 'API Key',
-      paste: '\u4ece\u526a\u8d34\u677f\u7c98\u8d34',
-      pasted: '\u5df2\u7c98\u8d34',
-      show: '\u663e\u793a',
-      hide: '\u9690\u85cf',
-      checking: '\u9a8c\u8bc1\u4e2d\u2026',
-      switchAsk: '\u786e\u8ba4\u5207\u6362\u5230\u300c{n}\u300d\uff1f\u540e\u7eed\u8bf7\u6c42\u5c06\u4f7f\u7528\u8be5\u8d26\u53f7\u3002',
-      removeAsk: '\u786e\u8ba4\u5220\u9664\u300c{n}\u300d\uff1f\u8be5\u8d26\u53f7\u5c06\u4ece\u672c\u673a\u8d26\u53f7\u5217\u8868\u4e2d\u79fb\u9664\u3002',
-      switchCta: '\u786e\u8ba4\u5207\u6362',
-      removeCta: '\u5220\u9664',
-      close: '\u5173\u95ed',
-      hostError: 'Host \u9519\u8bef',
+      paste: '从剪贴板粘贴',
+      pasted: '已粘贴',
+      show: '显示',
+      hide: '隐藏',
+      checking: '验证中…',
+      switchAsk: '确认切换到「{n}」？后续请求将使用该账号。',
+      removeAsk: '确认删除「{n}」？该账号将从本机账号列表中移除。',
+      switchCta: '确认切换',
+      removeCta: '删除',
+      hostError: 'Host 错误',
     }
+
     const en = {
       title: 'OpenCode Go quota',
       updated: 'Updated',
       refresh: 'Refresh',
       collapse: 'Collapse',
-      loading: 'Loading\u2026',
+      loading: 'Loading…',
       loadFailed: 'Failed to fetch snapshot',
-      noKeys: 'No opencode-go key configured (neither OPENCODE_GO_KEY_* nor OPENCODE_GO_API_KEY)',
+      noKeys: 'No opencode-go key configured (neither OPENCODE_GO_API_KEY nor OPENCODE_GO_KEY_*)',
       noEntries: 'No accounts found',
       inUse: 'in use',
       notInPool: 'not in pool',
@@ -107,7 +111,7 @@ window.__ModuleLoader__.load({
       day: 'd',
       add: 'Add',
       switch: 'Switch',
-      switching: 'Switching\u2026',
+      switching: 'Switching…',
       remove: 'Remove',
       cancel: 'Cancel',
       confirm: 'Confirm',
@@ -115,8 +119,6 @@ window.__ModuleLoader__.load({
       offline: 'offline',
       noData: 'no data',
       reset: 'resetting',
-      unauthorized: 'invalid key',
-      limited: 'rate-limited',
       addTitle: 'Add account',
       addName: 'Account name (blank generates one)',
       addKey: 'API key',
@@ -124,16 +126,15 @@ window.__ModuleLoader__.load({
       pasted: 'Pasted',
       show: 'Show',
       hide: 'Hide',
-      checking: 'Verifying\u2026',
+      checking: 'Verifying…',
       switchAsk: 'Switch to "{n}"? Later requests will use that account.',
-      removeAsk: 'Remove "{n}"? It will be dropped from this machine\u2019s account list.',
+      removeAsk: 'Remove "{n}"? It will be dropped from this machine’s account list.',
       switchCta: 'Switch',
       removeCta: 'Remove',
-      close: 'Close',
       hostError: 'Host error',
     }
-    const isZh = typeof navigator !== 'undefined' && /^\s*zh/i.test(navigator.language || '')
-    const t = isZh ? zh : en
+
+    const t = typeof navigator !== 'undefined' && /^\s*zh/i.test(navigator.language || '') ? zh : en
     const fill = (text, name) => String(text).split('{n}').join(name)
 
     // ------------------------------------------------------------ styles
@@ -146,7 +147,7 @@ window.__ModuleLoader__.load({
       tag.textContent = [
         // A vertical rounded rectangle: three stacked tracks, one per quota
         // window, each filled and coloured by its own usage.
-        '.th-gauge{position:fixed;right:10px;top:50%;z-index:1000;',
+        '.th-gauge{position:fixed;right:8px;top:80%;z-index:1000;',
         'transform:translateY(-50%) scale(var(--th-scale,1));transform-origin:100% 50%;',
         'width:34px;height:48px;border-radius:11px;box-sizing:border-box;display:flex;flex-direction:column;',
         'justify-content:center;gap:4px;padding:0 6px;background:var(--dsw-alias-bg-overlay);',
@@ -162,10 +163,12 @@ window.__ModuleLoader__.load({
         '.th-gauge-fill.na{background:var(--dsw-alias-label-tertiary)}',
 
         // The panel keeps its own size, but steps aside by the gauge's scaled
-        // width so a bigger gauge never covers it.
-        '.th-panel{position:fixed;top:50%;z-index:999;width:356px;',
-        'right:calc(18px + 34px * var(--th-scale,1));',
-        'transform:translateY(-50%);max-height:78vh;',
+        // width so a bigger gauge never covers it. It is bottom-anchored on the
+        // gauge's centre line (the gauge sits at 20vh from the bottom) so the two
+        // move together, and grows upward instead of being centred on the page.
+        '.th-panel{position:fixed;bottom:20vh;z-index:999;width:356px;',
+        'right:calc(16px + 34px * var(--th-scale,1));',
+        'max-height:72vh;',
         'overflow:auto;background:var(--dsw-alias-bg-overlay);',
         'border:1px solid var(--dsw-alias-border-l2);',
         'border-radius:var(--dsw-radius-lg);box-shadow:0 8px 28px rgba(0,0,0,.26);padding:10px 12px 8px;',
@@ -237,11 +240,9 @@ window.__ModuleLoader__.load({
 
     // ----------------------------------------------------------- helpers
 
-    /**
-     * Severity band for one window, matching TokenHub's thresholds: normal
-     * below warn, caution up to error, alarm at error and above. A window the
-     * endpoint itself flags as rate-limited is always the alarm band.
-     */
+    /** Severity band for one window, matching TokenHub's thresholds: normal
+     *  below warn, caution up to error, alarm at error and above. A window the
+     *  endpoint itself flags as rate-limited is always the alarm band. */
     function level(percent, status, thresholds) {
       if (status === 'rate-limited') return 'err'
       if (percent === null || percent === undefined || Number.isNaN(percent)) return 'na'
@@ -250,11 +251,27 @@ window.__ModuleLoader__.load({
       return 'ok'
     }
 
+    /** One window's reading, or null when the endpoint sent none. */
+    function pct(win) {
+      if (!win || typeof win.percent !== 'number' || !Number.isFinite(win.percent)) return null
+      return win.percent
+    }
+
+    /** One window of one entry, or null when this row carries no windows. */
+    function windowOf(entry, key) {
+      return entry && entry.windows ? entry.windows[key] || null : null
+    }
+
+    /** A reading as a bar width; no reading draws an empty bar, not a full one. */
+    function clampPct(value) {
+      return value === null ? 0 : Math.max(0, Math.min(100, value))
+    }
+
     /** Reset countdown: under a day in H/M, beyond it in days and hours. */
     function fmtRemain(iso) {
-      if (!iso) return '\u2014'
+      if (!iso) return '—'
       const when = new Date(iso)
-      if (Number.isNaN(when.getTime())) return '\u2014'
+      if (Number.isNaN(when.getTime())) return '—'
       const ms = when.getTime() - Date.now()
       if (ms <= 0) return t.reset
       const minutes = Math.floor(ms / 60000)
@@ -263,46 +280,9 @@ window.__ModuleLoader__.load({
       return Math.floor(hours / 24) + t.day + (hours % 24) + 'H'
     }
 
-    /** A short label for a window that returned no percentage. */
-    function metricNote(entry, window, isErr) {
-      if (isErr && (entry.error === 'unauthorized' || entry.error === 'http-401')) return t.unauthorized
-      if (isErr || !window || window.percent === null) return t.noData
-      if (window.status === 'rate-limited') return t.limited
-      return t.noData
-    }
-
     /** An entry with no usable window at all renders as one offline line. */
     function isOffline(entry) {
-      if (!entry.windows) return true
-      return WINDOWS.every((key) => {
-        const win = entry.windows[key]
-        return !win || win.percent === null
-      })
-    }
-
-
-    /**
-     * The gauge's three bars, one per window, in panel order: rolling on top,
-     * then weekly, then monthly. Each carries its own window's fill and colour,
-     * so which quota is filling up is answered by position and hue together.
-     *
-     * A window with no reading fills the whole track in the neutral colour: an
-     * empty bar would claim "nothing used" for a value nobody received.
-     * @param entries - the snapshot rows; an empty list yields three unknowns.
-     * @param thresholds - colour bands.
-     * @returns one { band, width } per window.
-     */
-    function barShape(entries, thresholds) {
-      const source = subjectOf(entries)
-      return WINDOWS.map((key) => {
-        const win = source && source.windows ? source.windows[key] : null
-        const known = Boolean(win) && typeof win.percent === 'number' && Number.isFinite(win.percent)
-        if (!known) return { band: 'na', width: 100 }
-        return {
-          band: level(win.percent, win.status, thresholds),
-          width: Math.max(0, Math.min(100, win.percent)),
-        }
-      })
+      return WINDOWS.every((key) => pct(windowOf(entry, key)) === null)
     }
 
     /** The account a summary describes: the one in force, else the first row. */
@@ -312,24 +292,41 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The gauge's three bars, one per window, in panel order: rolling on top,
+     * then weekly, then monthly. Each carries its own window's fill and colour,
+     * so which quota is filling up is answered by position and hue together.
+     *
+     * A window with no reading fills the whole track in the neutral colour: an
+     * empty bar would claim "nothing used" for a value nobody received.
+     * @returns one { band, width } per window.
+     */
+    function barShape(entries, thresholds) {
+      const source = subjectOf(entries)
+      return WINDOWS.map((key) => {
+        const win = windowOf(source, key)
+        const value = pct(win)
+        if (value === null) return { band: 'na', width: 100 }
+        return { band: level(value, win.status, thresholds), width: clampPct(value) }
+      })
+    }
+
+    /**
      * The gauge's tooltip: the three bars coloured say how much at a glance but
      * not how many, so this carries the numbers behind them and stops there.
      */
     function fabTooltip(entries) {
       const source = subjectOf(entries)
       if (!source) return t.title
-      const name = source.name || t.currentKey
       const parts = WINDOWS.map((key) => {
-        const win = source.windows ? source.windows[key] : null
-        const known = win && typeof win.percent === 'number' && Number.isFinite(win.percent)
-        return t.w[key] + ' ' + (known ? Math.round(win.percent) + '%' : t.noData)
+        const value = pct(windowOf(source, key))
+        return t.w[key] + ' ' + (value === null ? t.noData : Math.round(value) + '%')
       })
-      return t.title + ' \u00b7 ' + name + ' \u00b7 ' + parts.join(' \u00b7 ')
+      return t.title + ' · ' + (source.name || t.currentKey) + ' · ' + parts.join(' · ')
     }
 
     /** Clock text for the last successful refresh. */
     function fmtClock(ms) {
-      if (!ms) return '\u2014'
+      if (!ms) return '—'
       const when = new Date(ms)
       const pad = (n) => (n < 10 ? '0' + n : String(n))
       return pad(when.getHours()) + ':' + pad(when.getMinutes())
@@ -342,13 +339,13 @@ window.__ModuleLoader__.load({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-        .then((res) => res.json().then((data) => data).catch(() => ({ ok: false, error: 'invalid response' })))
+        .then((res) => res.json().catch(() => ({ ok: false, error: 'invalid response' })))
         .catch((error) => ({ ok: false, error: String((error && error.message) || error) }))
     }
 
     // ----------------------------------------------------------- dialogs
 
-    /** Modal shell shared by the confirm and add dialogs. */
+    /** Modal shell shared by the confirm and account dialogs. */
     function Modal(props) {
       return h(
         'div',
@@ -383,14 +380,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Add-account dialog. The key is verified by the Host against the live
-     * endpoint before it is stored, so a bad key is refused inside this dialog
-     * and the inputs survive for a retry.
+     * The three things this dialog does, and the only three differences between
+     * them: what it says, whether it takes a key, and what it posts.
+     */
+    const DIALOG_MODES = {
+      add: { title: 'addTitle', hint: null, label: 'addName', key: true, cta: 'confirm', busyCta: 'checking' },
+      join: { title: 'joinTitle', hint: 'joinHint', label: 'addName', key: false, cta: 'joinCta', busyCta: 'confirm' },
+      rename: { title: 'renameTitle', hint: 'renameHint', label: 'renameLabel', key: false, cta: 'renameCta', busyCta: 'confirm' },
+    }
+
+    /**
+     * Add / join / rename dialog. The key is verified by the Host against the
+     * live endpoint before it is stored, so a bad key is refused inside this
+     * dialog and the inputs survive for a retry.
      */
     function AddDialog(props) {
       const mode = props.mode || 'add'
-      const joining = mode === 'join'
-      const renaming = mode === 'rename'
+      const text = DIALOG_MODES[mode] || DIALOG_MODES.add
       const [accountName, setAccountName] = React.useState(props.initialName || '')
       const [key, setKey] = React.useState('')
       const [reveal, setReveal] = React.useState(false)
@@ -404,25 +410,26 @@ window.__ModuleLoader__.load({
         }
         navigator.clipboard
           .readText()
-          .then((text) => {
-            if (text && text.trim()) {
-              setKey(text.trim())
+          .then((clip) => {
+            if (clip && clip.trim()) {
+              setKey(clip.trim())
               setNote({ kind: 'info', text: t.pasted })
             }
           })
           .catch(() => setNote({ kind: 'err', text: t.noData }))
       }
 
+      const payload = () => {
+        if (mode === 'join') return { op: 'joinPool', name: accountName }
+        if (mode === 'rename') return { op: 'rename', name: props.from, to: accountName }
+        return { op: 'add', name: accountName, key }
+      }
+
       const submit = () => {
         if (busy) return
         setBusy(true)
         setNote(null)
-        const payload = joining
-          ? { op: 'joinPool', name: accountName }
-          : renaming
-            ? { op: 'rename', name: props.from, to: accountName }
-            : { op: 'add', name: accountName, key: key }
-        post(ACCOUNT, payload).then((res) => {
+        post(ACCOUNT, payload()).then((res) => {
           setBusy(false)
           if (res && res.ok) {
             props.onAdded(res.message || t.ok)
@@ -432,19 +439,37 @@ window.__ModuleLoader__.load({
         })
       }
 
+      const keyField = h(
+        'div',
+        { className: 'th-field' },
+        h('label', { className: 'th-label' }, t.addKey),
+        h(
+          'div',
+          { className: 'th-input-row' },
+          h('input', {
+            className: 'th-input',
+            type: reveal ? 'text' : 'password',
+            value: key,
+            placeholder: 'sk-...',
+            spellCheck: false,
+            autoComplete: 'new-password',
+            name: 'dsh-tokenhub-api-key',
+            onChange: (event) => setKey(event.target.value),
+          }),
+          h('button', { className: 'th-btn', onClick: () => setReveal(!reveal) }, reveal ? t.hide : t.show),
+          h('button', { className: 'th-btn', onClick: paste }, t.paste),
+        ),
+      )
+
       return h(
         Modal,
         { onCancel: props.onCancel },
-        h('div', { className: 'th-modal-title' }, renaming ? t.renameTitle : joining ? t.joinTitle : t.addTitle),
-        renaming
-          ? h('div', { className: 'th-modal-body' }, t.renameHint)
-          : joining
-            ? h('div', { className: 'th-modal-body' }, t.joinHint)
-            : null,
+        h('div', { className: 'th-modal-title' }, t[text.title]),
+        text.hint ? h('div', { className: 'th-modal-body' }, t[text.hint]) : null,
         h(
           'div',
           { className: 'th-field' },
-          h('label', { className: 'th-label' }, renaming ? t.renameLabel : t.addName),
+          h('label', { className: 'th-label' }, t[text.label]),
           h('input', {
             className: 'th-input',
             value: accountName,
@@ -457,29 +482,7 @@ window.__ModuleLoader__.load({
             onChange: (event) => setAccountName(event.target.value),
           }),
         ),
-        mode !== 'add'
-          ? null
-          : h(
-          'div',
-          { className: 'th-field' },
-          h('label', { className: 'th-label' }, t.addKey),
-          h(
-            'div',
-            { className: 'th-input-row' },
-            h('input', {
-              className: 'th-input',
-              type: reveal ? 'text' : 'password',
-              value: key,
-              placeholder: 'sk-...',
-              spellCheck: false,
-              autoComplete: 'new-password',
-              name: 'dsh-tokenhub-api-key',
-              onChange: (event) => setKey(event.target.value),
-            }),
-            h('button', { className: 'th-btn', onClick: () => setReveal(!reveal) }, reveal ? t.hide : t.show),
-            h('button', { className: 'th-btn', onClick: paste }, t.paste),
-          ),
-        ),
+        text.key ? keyField : null,
         note ? h('div', { className: 'th-hint ' + note.kind }, note.text) : null,
         h(
           'div',
@@ -488,15 +491,7 @@ window.__ModuleLoader__.load({
           h(
             'button',
             { className: 'th-btn', disabled: busy, onClick: submit },
-            busy
-              ? mode === 'add'
-                ? t.checking
-                : t.confirm
-              : renaming
-                ? t.renameCta
-                : joining
-                  ? t.joinCta
-                  : t.confirm,
+            busy ? t[text.busyCta] : t[text.cta],
           ),
         ),
       )
@@ -506,58 +501,53 @@ window.__ModuleLoader__.load({
 
     /** One metric row: label, threshold-coloured bar, percentage, countdown. */
     function MetricRow(props) {
-      const win = props.entry.windows ? props.entry.windows[props.window] : null
-      const known = win && typeof win.percent === 'number' && Number.isFinite(win.percent)
-      const band = level(known ? win.percent : null, win ? win.status : null, props.thresholds)
-      const width = known ? Math.max(0, Math.min(100, win.percent)) : 0
+      const win = windowOf(props.entry, props.window)
+      const value = pct(win)
+      const band = level(value, win ? win.status : null, props.thresholds)
       return h(
         'div',
         { className: 'th-row' },
         h('span', { className: 'th-row-label' }, props.label),
-        h('span', { className: 'th-bar' }, h('i', { className: 'th-fill ' + band, style: { width: width + '%' } })),
-        h('span', { className: 'th-pct ' + band }, known ? Math.round(win.percent) + '%' : t.noData),
-        h('span', { className: 'th-reset' }, win && win.resetsAt ? '\u27f3 ' + fmtRemain(win.resetsAt) : ''),
+        h(
+          'span',
+          { className: 'th-bar' },
+          h('i', { className: 'th-fill ' + band, style: { width: clampPct(value) + '%' } }),
+        ),
+        h('span', { className: 'th-pct ' + band }, value === null ? t.noData : Math.round(value) + '%'),
+        h('span', { className: 'th-reset' }, win && win.resetsAt ? '⟳ ' + fmtRemain(win.resetsAt) : ''),
       )
     }
 
     /** One account card: identity, three metric rows, and the row's actions. */
     function AccountCard(props) {
-      const entry = props.entry
-      const offline = isOffline(entry)
+      const { entry, rowId, thresholds, busy, open } = props
+      const inPool = entry.inPool !== false
       const actions = []
       // The row in force carries Add. It is the row the user is looking at, and
       // the panel must never end up with no way to add another account.
       if (entry.active) {
-        actions.push(h('button', { className: 'th-btn', key: 'add', onClick: props.onAdd }, t.add))
+        actions.push(h('button', { className: 'th-btn', key: 'add', onClick: () => open({ kind: 'add' }) }, t.add))
         // A key with no pool entry behind it disappears the moment a switch
         // replaces it, so offer to file it before that can happen.
-        if (entry.inPool === false) {
-          actions.push(h('button', { className: 'th-btn', key: 'join', onClick: props.onJoin }, t.join))
+        if (!inPool) {
+          actions.push(h('button', { className: 'th-btn', key: 'join', onClick: () => open({ kind: 'join' }) }, t.join))
         }
       }
-      if (!entry.active && entry.inPool !== false) {
-        actions.push(
-          h(
-            'button',
-            { className: 'th-btn', key: 'switch', disabled: props.busy, onClick: props.onSwitch },
-            props.busy ? t.switching : t.switch,
-          ),
-        )
+      if (!entry.active && inPool) {
+        const onClick = () => open({ kind: 'confirm', action: 'switch', name: rowId })
+        actions.push(h('button', { className: 'th-btn', key: 'switch', disabled: busy, onClick }, busy ? t.switching : t.switch))
       }
       // Renaming only changes the name a key is filed under, so it is safe on
       // the account in force as well as on a spare.
-      if (entry.inPool !== false) {
-        actions.push(h('button', { className: 'th-btn', key: 'rename', onClick: props.onRename }, t.rename))
+      if (inPool) {
+        const onClick = () => open({ kind: 'rename', from: rowId, current: entry.name })
+        actions.push(h('button', { className: 'th-btn', key: 'rename', onClick }, t.rename))
       }
-      if (!entry.active && entry.inPool !== false) {
-        actions.push(
-          h(
-            'button',
-            { className: 'th-btn th-danger', key: 'remove', disabled: props.busy, onClick: props.onRemove },
-            t.remove,
-          ),
-        )
+      if (!entry.active && inPool) {
+        const onClick = () => open({ kind: 'confirm', action: 'remove', name: rowId })
+        actions.push(h('button', { className: 'th-btn th-danger', key: 'remove', disabled: busy, onClick }, t.remove))
       }
+
       return h(
         'div',
         { className: 'th-card' + (entry.active ? ' th-card-active' : '') },
@@ -567,22 +557,74 @@ window.__ModuleLoader__.load({
           h('span', { className: 'th-dot ' + (entry.active ? 'on' : 'off') }),
           h('span', { className: 'th-name' }, entry.name || t.currentKey),
           entry.active ? h('span', { className: 'th-chip' }, t.inUse) : null,
-          entry.inPool === false ? h('span', { className: 'th-chip' }, t.notInPool) : null,
+          inPool ? null : h('span', { className: 'th-chip' }, t.notInPool),
           entry.masked ? h('span', { className: 'th-mask' }, entry.masked) : null,
           h('span', { className: 'th-spacer' }),
           actions,
         ),
-        offline
-          ? h('div', { className: 'th-offline' }, t.offline + (entry.error ? ' \u00b7 ' + entry.error : ''))
+        isOffline(entry)
+          ? h('div', { className: 'th-offline' }, t.offline + (entry.error ? ' · ' + entry.error : ''))
           : WINDOWS.map((key) =>
               h(MetricRow, {
-                key: key,
-                entry: entry,
+                key,
+                entry,
                 window: key,
                 label: t.w[key],
-                thresholds: props.thresholds,
+                thresholds,
               }),
             ),
+      )
+    }
+
+    /** The expanded panel: header, one card per account, and the last message. */
+    function Panel(props) {
+      const { data, failed, entries, thresholds, busy, toast, addButton } = props
+      let body
+      if (failed) body = h('div', { className: 'th-empty' }, t.loadFailed)
+      else if (!data) body = h('div', { className: 'th-empty' }, t.loading)
+      else if (entries.length === 0) {
+        body = h(
+          'div',
+          { className: 'th-empty' },
+          h('div', null, data.error === 'no-keys' ? t.noKeys : t.noEntries),
+          addButton,
+        )
+      } else {
+        const cards = entries.map((entry) => {
+          // The host half and the bundle have independent lifecycles — dsh serves
+          // the bundle by revision from the boot graph while the host module is
+          // cached by URL — so an older host may send no id at all. Its name is
+          // the id then, which is what the routes took before ids existed.
+          const rowId = entry.id || entry.name
+          return h(AccountCard, {
+            key: rowId,
+            rowId,
+            entry,
+            thresholds,
+            busy: busy === rowId,
+            open: props.open,
+          })
+        })
+        // Safety net: with no row in force (no key configured, say) the panel
+        // still offers Add rather than leaving the user with no way forward.
+        body = entries.some((entry) => entry.active)
+          ? cards
+          : h(React.Fragment, null, cards, h('div', { className: 'th-empty' }, h('div', null, t.noActive), addButton))
+      }
+
+      return h(
+        'div',
+        { className: 'th-panel' },
+        h(
+          'div',
+          { className: 'th-head' },
+          h('span', { className: 'th-title' }, t.title),
+          h('span', { className: 'th-time' }, t.updated + ' ' + fmtClock(data && data.updatedAt)),
+          h('button', { className: 'th-btn', onClick: props.onRefresh }, t.refresh),
+          h('button', { className: 'th-btn', onClick: props.onCollapse }, t.collapse),
+        ),
+        body,
+        toast ? h('div', { className: 'th-toast ' + toast.kind }, toast.text) : null,
       )
     }
 
@@ -635,144 +677,71 @@ window.__ModuleLoader__.load({
         return () => root.style.removeProperty('--th-scale')
       }, [data])
 
-      const say = (kind, text) => setToast({ kind: kind, text: text })
+      const say = (kind, text) => setToast({ kind, text })
 
-      const runSwitch = (name) => {
-        setBusy(name)
-        post(SWITCH, { name: name }).then((res) => {
+      /**
+       * Run one mutation for a row: busy marker, one message, then a forced
+       * reload. kindOf lets the caller downgrade a technically-successful result
+       * that still carries a failure worth seeing.
+       */
+      const run = (rowId, path, body, kindOf) => {
+        setBusy(rowId)
+        post(path, body).then((res) => {
           setBusy(null)
-          if (res && res.ok) {
-            // The host composes the whole message; a failed opencode sync inside
-            // it still deserves the problem styling.
-            const authFailed = res.opencodeAuth && res.opencodeAuth.ok === false
-            say(authFailed ? 'err' : 'ok', res.message || t.ok)
-          } else {
-            say('err', (res && res.error) || t.hostError)
-          }
+          if (res && res.ok) say(kindOf ? kindOf(res) : 'ok', res.message || t.ok)
+          else say('err', (res && res.error) || t.hostError)
           load(true)
         })
       }
 
-      const runRemove = (name) => {
-        setBusy(name)
-        post(ACCOUNT, { op: 'remove', name: name }).then((res) => {
-          setBusy(null)
-          say(res && res.ok ? 'ok' : 'err', (res && (res.message || res.error)) || t.hostError)
-          load(true)
-        })
-      }
+      const runSwitch = (name) =>
+        run(name, SWITCH, { name }, (res) => (res.opencodeAuth && res.opencodeAuth.ok === false ? 'err' : 'ok'))
+      const runRemove = (name) => run(name, ACCOUNT, { op: 'remove', name })
 
-      const thresholds = (data && data.thresholds) || { warn: 60, error: 85 }
+      const thresholds = (data && data.thresholds) || FALLBACK_THRESHOLDS
       const entries = (data && data.entries) || []
       // The gauge's three bars, top to bottom: rolling, weekly, monthly. A failed
       // snapshot is folded in as an empty list, so every bar reads "no data"
       // rather than three calm ones.
       const bars = barShape(failed ? [] : entries, thresholds)
 
-      const openAdd = () => setDialog({ kind: 'add' })
-      const addButton = () =>
-        h('button', { className: 'th-btn', style: { marginTop: '8px' }, onClick: openAdd }, t.add)
+      const openDialog = (next) => setDialog(next)
+      const addButton = h(
+        'button',
+        { className: 'th-btn', style: { marginTop: '8px' }, onClick: () => openDialog({ kind: 'add' }) },
+        t.add,
+      )
 
-      let body
-      if (failed) body = h('div', { className: 'th-empty' }, t.loadFailed)
-      else if (!data) body = h('div', { className: 'th-empty' }, t.loading)
-      else if (entries.length === 0) {
-        body = h(
-          'div',
-          { className: 'th-empty' },
-          h('div', null, data.error === 'no-keys' ? t.noKeys : t.noEntries),
-          addButton(),
-        )
-      } else {
-        const cards = entries.map((entry) => {
-          // The host half and the bundle have independent lifecycles — dsh serves
-          // the bundle by revision from the boot graph while the host module is
-          // cached by URL — so an older host may send no id at all. Its name is
-          // the id then, which is what the routes took before ids existed.
-          const rowId = entry.id || entry.name
-          return h(AccountCard, {
-            key: rowId,
-            entry: entry,
-            thresholds: thresholds,
-            busy: busy === rowId,
-            onAdd: openAdd,
-            onJoin: () => setDialog({ kind: 'join' }),
-            onRename: () => setDialog({ kind: 'rename', from: rowId, current: entry.name }),
-            onSwitch: () => setDialog({ kind: 'confirm', action: 'switch', name: rowId }),
-            onRemove: () => setDialog({ kind: 'confirm', action: 'remove', name: rowId }),
-          })
-        })
-        // Safety net: with no row in force (no key configured, say) the panel
-        // still offers Add rather than leaving the user with no way forward.
-        body = entries.some((entry) => entry.active)
-          ? cards
-          : h(React.Fragment, null, cards, h('div', { className: 'th-empty' }, h('div', null, t.noActive), addButton()))
+      const closeDialog = () => setDialog(null)
+      const dialogDone = (message) => {
+        setDialog(null)
+        say('ok', message)
+        load(true)
       }
 
-      const panel = open
-        ? h(
-            'div',
-            { className: 'th-panel' },
-            h(
-              'div',
-              { className: 'th-head' },
-              h('span', { className: 'th-title' }, t.title),
-              h('span', { className: 'th-time' }, t.updated + ' ' + fmtClock(data && data.updatedAt)),
-              h('button', { className: 'th-btn', onClick: () => load(true) }, t.refresh),
-              h('button', { className: 'th-btn', onClick: () => setOpen(false) }, t.collapse),
-            ),
-            body,
-            toast ? h('div', { className: 'th-toast ' + toast.kind }, toast.text) : null,
-          )
-        : null
-
       let modal = null
-      if (dialog && dialog.kind === 'add') {
-        modal = h(AddDialog, {
-          mode: 'add',
-          onCancel: () => setDialog(null),
-          onAdded: (message) => {
-            setDialog(null)
-            say('ok', message)
-            load(true)
-          },
-        })
-      } else if (dialog && dialog.kind === 'rename') {
-        modal = h(AddDialog, {
-          mode: 'rename',
-          from: dialog.from,
-          initialName: dialog.current,
-          onCancel: () => setDialog(null),
-          onAdded: (message) => {
-            setDialog(null)
-            say('ok', message)
-            load(true)
-          },
-        })
-      } else if (dialog && dialog.kind === 'join') {
-        modal = h(AddDialog, {
-          mode: 'join',
-          onCancel: () => setDialog(null),
-          onAdded: (message) => {
-            setDialog(null)
-            say('ok', message)
-            load(true)
-          },
-        })
-      } else if (dialog && dialog.kind === 'confirm') {
+      if (dialog && dialog.kind === 'confirm') {
         const isRemove = dialog.action === 'remove'
         modal = h(ConfirmDialog, {
           title: isRemove ? t.remove : t.switch,
           body: fill(isRemove ? t.removeAsk : t.switchAsk, dialog.name),
           cta: isRemove ? t.removeCta : t.switchCta,
           danger: isRemove,
-          onCancel: () => setDialog(null),
+          onCancel: closeDialog,
           onConfirm: () => {
             const name = dialog.name
-            setDialog(null)
+            closeDialog()
             if (isRemove) runRemove(name)
             else runSwitch(name)
           },
+        })
+      } else if (dialog) {
+        modal = h(AddDialog, {
+          mode: dialog.kind,
+          from: dialog.from,
+          initialName: dialog.current,
+          onCancel: closeDialog,
+          onAdded: dialogDone,
         })
       }
 
@@ -790,7 +759,20 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
-        panel,
+        open
+          ? h(Panel, {
+              data,
+              failed,
+              entries,
+              thresholds,
+              busy,
+              toast,
+              addButton,
+              open: openDialog,
+              onRefresh: () => load(true),
+              onCollapse: () => setOpen(false),
+            })
+          : null,
         modal,
       )
     }
