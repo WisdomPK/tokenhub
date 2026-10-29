@@ -406,6 +406,24 @@ try {
     all(host8, '.th-gauge-fill').slice(1).map((f) => f.style.width).join(','),
   )
 
+  // ================= over-100 readings keep their text, cap their bar =================
+  SNAPSHOT = {
+    updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
+    entries: [poolRow('over', true, { rolling: win(120, 1), weekly: win(59.6, 1), monthly: win(0, 1) })],
+  }
+  const host10 = await mount()
+  await click(q(host10, '.th-gauge'))
+  check(
+    'a reading over 100 caps the bar but not the number',
+    all(host10, '.th-gauge-fill')[0].style.width === '100%' && txt(host10).indexOf('120%') !== -1,
+    all(host10, '.th-gauge-fill')[0].style.width + ' / ' + txt(host10).slice(0, 80),
+  )
+  check(
+    'a fractional reading is displayed at the nearest integer',
+    txt(host10).indexOf('60%') !== -1 && txt(host10).indexOf('0%') !== -1,
+    txt(host10).slice(0, 120),
+  )
+
   // ================= a failed snapshot =================
   const liveFetch = globalThis.fetch
   globalThis.fetch = async () => { throw new Error('offline') }

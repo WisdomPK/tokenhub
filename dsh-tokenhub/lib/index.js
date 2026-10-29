@@ -122,15 +122,57 @@ function describeError(code, detail) {
   return detail ? String(detail) : String(code)
 }
 
+/**
+ * One percentage at the API boundary.
+ *
+ * A finite number is a reading, including 0 and values over 100. A non-empty
+ * decimal string is accepted for compatibility. Everything else — null, an
+ * empty string, booleans, arrays, objects, NaN, Infinity, negatives — means the
+ * window reported nothing. Coercing any of those to 0 would invent a reading.
+ * @returns the percentage, or null when the value is not a usable one.
+ */
+function parsePercent(raw) {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw >= 0 ? raw : null
+  if (typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (!/^\d+(?:\.\d+)?$/.test(text)) return null
+  const value = Number(text)
+  return Number.isFinite(value) ? value : null
+}
+
+/**
+ * One reset timestamp at the API boundary. resetsAt is the current field name;
+ * resets_at is accepted for older payloads. A timezone-less value is UTC. A bad
+ * timestamp becomes null, but only the countdown is affected — the window's
+ * percentage is parsed independently.
+ */
+function parseResetsAt(raw) {
+  if (typeof raw !== 'string') return null
+  const text = raw.trim()
+  if (text.length === 0) return null
+  const naive = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text)
+  const parsed = Date.parse(naive ? text.replace(' ', 'T') + 'Z' : text)
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null
+}
+
 /** Defensive parse of one usage window; a malformed window degrades to nulls. */
 function pickWindow(raw) {
-  if (!raw || typeof raw !== 'object') return { status: null, percent: null, resetsAt: null }
-  const value = typeof raw.percent === 'number' ? raw.percent : Number(raw.percent)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { status: null, percent: null, resetsAt: null }
+  }
+  const reset = Object.prototype.hasOwnProperty.call(raw, 'resetsAt') ? raw.resetsAt : raw.resets_at
   return {
     status: typeof raw.status === 'string' ? raw.status : null,
-    percent: Number.isFinite(value) ? value : null,
-    resetsAt: typeof raw.resetsAt === 'string' ? raw.resetsAt : null,
+    percent: parsePercent(raw.percent),
+    resetsAt: parseResetsAt(reset),
   }
+}
+
+/** Whether any window carries a real reading; a 200 alone proves nothing. */
+function hasUsableWindow(windows) {
+  return Boolean(
+    windows && Object.values(windows).some((window) => window && typeof window.percent === 'number'),
+  )
 }
 
 /** Read a JSON document, tolerating a UTF-8 BOM written by another tool. */
@@ -210,8 +252,13 @@ async function fetchUsage(key, baseUrl, timeoutMs) {
     } catch {
       return { error: 'bad-json', detail: 'json parse failed' }
     }
-    const usage = data && typeof data === 'object' && data.usage ? data.usage : data
-    if (!usage || typeof usage !== 'object') return { error: 'bad-json', detail: 'no usage object' }
+    let usage = data
+    if (data && typeof data === 'object' && !Array.isArray(data) && Object.prototype.hasOwnProperty.call(data, 'usage')) {
+      usage = data.usage
+    }
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+      return { error: 'bad-json', detail: 'no usage object' }
+    }
     return {
       error: null,
       detail: null,
@@ -855,6 +902,9 @@ function createHub(ctx, options) {
     const probe = await fetchUsage(key, baseUrl, timeoutMs)
     if (probe.error) {
       return { ok: false, error: '密钥校验失败：' + describeError(probe.error, probe.detail) }
+    }
+    if (!hasUsableWindow(probe.windows)) {
+      return { ok: false, error: '接口数据不可用：该密钥没有返回任何可用额度窗口' }
     }
 
     const write = await writeCredential(() => ctx.credentials.set(ref, key))
