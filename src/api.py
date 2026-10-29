@@ -6,6 +6,8 @@
 """
 
 import json
+import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -16,6 +18,8 @@ from urllib.request import Request, urlopen
 API_URL = "https://opencode.ai/zen/go/v1/usage"
 REQUEST_TIMEOUT = 15
 MAX_WORKERS = 8
+WINDOW_NAMES = ("rolling", "weekly", "monthly")
+_DECIMAL_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 @dataclass
@@ -23,7 +27,7 @@ class UsageMetric:
     """单个窗口（5小时/每周/每月）的额度指标。"""
 
     status: str
-    percent: int | None
+    percent: float | None
     resets_at: str | None
     error: str | None = None
 
@@ -37,6 +41,7 @@ class AccountUsage:
     weekly: UsageMetric
     monthly: UsageMetric
     fetched_at: float
+    account_error: str | None = None
 
 
 class ApiClient:
@@ -100,19 +105,90 @@ class ApiClient:
     def _parse_metric(item) -> UsageMetric:
         if not isinstance(item, dict):
             return UsageMetric("error", None, None, "数据缺失")
-        try:
-            percent = int(item.get("percent"))
-        except (TypeError, ValueError):
-            percent = None
+        percent = ApiClient._parse_percent(item.get("percent"))
         status = str(item.get("status") or "ok")
-        resets_at = item.get("resetsAt") or item.get("resets_at")
-        return UsageMetric(status, percent, resets_at if isinstance(resets_at, str) else None)
+        resets_at = None
+        for field in ("resetsAt", "resets_at"):
+            value = item.get(field)
+            if isinstance(value, str) and value:
+                resets_at = value
+                break
+        return UsageMetric(status, percent, resets_at)
+
+    @staticmethod
+    def _parse_percent(value) -> float | None:
+        """边界解析：只接受有限非负数与十进制数字字符串；bool/null/空串等不可用。"""
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not _DECIMAL_RE.fullmatch(text):
+                return None
+            number = float(text)
+        else:
+            return None
+        if not math.isfinite(number) or number < 0:
+            return None
+        return number
 
     @staticmethod
     def _error_usage(key: str, message: str) -> AccountUsage:
         now = time.time()
         metric = UsageMetric("error", None, None, message)
-        return AccountUsage(key, metric, metric, metric, now)
+        return AccountUsage(key, metric, metric, metric, now, account_error=message)
+
+
+def usage_validation_error(usage: AccountUsage | None) -> str | None:
+    """新增账号校验：至少一个窗口有有效读数才接受（不凭 HTTP 200 判定）。"""
+    if usage is None:
+        return "接口无返回"
+    account_error = getattr(usage, "account_error", None)
+    if account_error:
+        return account_error
+    for name in WINDOW_NAMES:
+        metric = getattr(usage, name, None)
+        if (metric is not None and getattr(metric, "error", None) is None
+                and getattr(metric, "percent", None) is not None):
+            return None
+    return "接口数据不可用"
+
+
+def display_percent(percent: float | None) -> int | None:
+    """展示取整：floor(x + 0.5)，保留原始值用于阈值判断。"""
+    if percent is None:
+        return None
+    return int(math.floor(percent + 0.5))
+
+
+def remaining_seconds(resets_at, now: datetime | None = None) -> float | None:
+    """重置剩余秒数；无时区按 UTC；无效/缺失时间返回 None。"""
+    if isinstance(resets_at, datetime):
+        reset = resets_at
+    elif isinstance(resets_at, str):
+        text = resets_at.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            reset = datetime.fromisoformat(text)
+        except (ValueError, TypeError):
+            return None
+    else:
+        return None
+    if reset.tzinfo is None:
+        reset = reset.replace(tzinfo=timezone.utc)
+    ref = now if now is not None else datetime.now(timezone.utc)
+    if not isinstance(ref, datetime):
+        return None
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    try:
+        return (reset - ref).total_seconds()
+    except (OverflowError, TypeError, ValueError):
+        return None
 
 
 def format_countdown(resets_at: str, now: datetime | None = None) -> str:
@@ -120,21 +196,12 @@ def format_countdown(resets_at: str, now: datetime | None = None) -> str:
 
     resetsAt 按 UTC 解析（带 Z 后缀），与本地时区无关。
     """
-    if not resets_at:
+    seconds = remaining_seconds(resets_at, now)
+    if seconds is None:
         return ""
-    try:
-        reset = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
-        if reset.tzinfo is None:
-            reset = reset.replace(tzinfo=timezone.utc)
-        ref = now if now is not None else datetime.now(timezone.utc)
-        if ref.tzinfo is None:
-            ref = ref.replace(tzinfo=timezone.utc)
-        diff = reset - ref
-    except (ValueError, TypeError, OverflowError):
-        return ""
-    if diff.total_seconds() <= 0:
+    if seconds <= 0:
         return "即将重置"
-    minutes = int(diff.total_seconds() // 60)
+    minutes = int(seconds // 60)
     hours = minutes // 60
     mins = minutes % 60
     if hours < 24:

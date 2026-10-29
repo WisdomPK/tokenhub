@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Optional
 
-from api import ApiClient  # Lane A 产出；运行期集成后可用
+from api import ApiClient, usage_validation_error  # Lane A 产出；运行期集成后可用
 
 
 class SettingsWindow:
@@ -391,17 +391,8 @@ class SettingsWindow:
 
     @staticmethod
     def _usage_error(usage) -> str:
-        if usage is None:
-            return '接口无返回'
-        for metric_key in ('rolling', 'weekly', 'monthly'):
-            m = getattr(usage, metric_key, None)
-            if m is not None:
-                err = getattr(m, 'error', None)
-                if err:
-                    return f'{metric_key}: {err}'
-                if getattr(m, 'percent', None) is None:
-                    return f'{metric_key}: 数据不完整'
-        return ''
+        """新增校验：至少一个窗口有效才接受（接口数据不可用 ≠ 密钥有效）。"""
+        return usage_validation_error(usage)
 
     def _on_add_done(self, label, key, usage, err) -> None:
         if not self.window or not self.window.winfo_exists():

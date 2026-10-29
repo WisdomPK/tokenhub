@@ -51,6 +51,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable, Optional
 
+from api import display_percent
 from config import Config  # 掩码唯一规则（config 不 import UI，无循环依赖）
 from dialogs import AddAccountDialog, ConfirmDialog
 from logger import log_exception  # tick 块级失败诊断（§7.2）
@@ -397,7 +398,7 @@ class FloatingWindow:
             # U03：单项指标错误 → 上行=标签+状态短文案，下行=⟳ 倒计时
             # （其他指标照常显示；文案映射见 _metric_error_text）
             return percent, self._metric_error_text(err), self._countdown(m), True, True
-        return (percent, f'{percent}%' if percent is not None else '--',
+        return (percent, f'{display_percent(percent)}%' if percent is not None else '--',
                 self._countdown(m), True, False)
 
     def _block_width(self, label_text: str, pct_text: str, cd_text: str,
@@ -471,7 +472,7 @@ class FloatingWindow:
                 _lc.configure(text=self._countdown(m))
                 return
             p = self._metric_percent(m)
-            _lp.configure(text=f'{p}%' if p is not None else '--',
+            _lp.configure(text=f'{display_percent(p)}%' if p is not None else '--',
                           fg=self.c['offline'] if p is None else self._pct_color(p))
             _lc.configure(text=self._countdown(m))
 
@@ -1067,7 +1068,7 @@ class FloatingWindow:
     def _metric(usage, key):
         return getattr(usage, key, None) if usage is not None else None
 
-    def _pct_color(self, percent: Optional[int]) -> str:
+    def _pct_color(self, percent: Optional[float]) -> str:
         if percent is None:
             return self.c['offline']
         if percent >= 85:

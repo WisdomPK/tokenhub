@@ -56,18 +56,10 @@ def _default_validator(key: str) -> Optional[str]:
     与 settings_window 的做法一致：失败原因在 UsageMetric.error 中
     （如「密钥无效（401）」「网络错误」）。
     """
-    from api import ApiClient  # 延迟导入：preview 注入假校验器时无需网络依赖
+    from api import ApiClient, usage_validation_error  # 延迟导入：preview 注入假校验器时无需网络依赖
 
     usage = ApiClient().fetch_usage(key)
-    for metric_key in ('rolling', 'weekly', 'monthly'):
-        metric = getattr(usage, metric_key, None)
-        if metric is not None:
-            err = getattr(metric, 'error', None)
-            if err:
-                return err
-            if getattr(metric, 'percent', None) is None:
-                return f'{metric_key}: 数据不完整'
-    return None
+    return usage_validation_error(usage)
 
 
 class BaseDialog:
