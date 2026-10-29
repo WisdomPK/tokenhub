@@ -46,6 +46,10 @@ function isValidKey(key: string): boolean {
 }
 const MAX_BODY_BYTES = 4096;
 const BACKUP_KEEP = 5;
+/** auth.json 同名派生文件标签（备份 / 写入临时 / 恢复临时）。 */
+const BACKUP_TAG = ".tokenhub.bak-";
+const TMP_TAG = ".tokenhub.tmp-";
+const RESTORE_TMP_TAG = ".tokenhub.restoretmp-";
 
 type PluginInput = {
   serverUrl?: URL | string;
@@ -55,16 +59,39 @@ type PluginInput = {
 
 type SwitchResult = { ok: boolean; method: "api" | "file"; error?: string };
 
-/** 掩码（统一规则，与 Python config.mask_key 一致）：
- * oc_sk_ 开头且长度≥16 → 前8+…+后4；其他且长度≥12 → 前6+…+后4；否则 → *** */
-function maskKey(key: string): string {
-  if (key.startsWith("oc_sk_") && key.length >= 16) {
-    return key.slice(0, 8) + "…" + key.slice(-4);
+/** 异常文本化（与 Python 端 str(exc) 等价）。 */
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** auth.json 的同目录派生文件名（标签 + 8 位随机 hex），供原子替换与恢复使用。 */
+function siblingName(target: string, tag: string): string {
+  return `${target}${tag}${randomBytes(4).toString("hex")}`;
+}
+
+/** 去掉 UTF-8 BOM 前缀（外部工具如 PowerShell 可能写入 BOM）。 */
+function stripBom(raw: string): string {
+  return raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+}
+
+/** 是否为「对象且含 opencode-go 字段」的 auth.json 内容。 */
+function hasAuthField(value: unknown): boolean {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    !!(value as Record<string, unknown>)[AUTH_FIELD]
+  );
+}
+
+/** 恢复失败的提示：只有备份确实存在时才在文案里引用备份路径。 */
+function restoreFailedHint(backupPath: string | null, detail?: string): string {
+  if (backupPath && existsSync(backupPath)) {
+    return `恢复失败，状态待确认；备份位于 ${backupPath}`;
   }
-  if (key.length >= 12) {
-    return key.slice(0, 6) + "…" + key.slice(-4);
-  }
-  return "***";
+  return detail === undefined
+    ? "恢复失败，状态待确认"
+    : `恢复失败，状态待确认（${detail}）`;
 }
 
 /**
@@ -94,9 +121,7 @@ function resolveExePath(): string | null {
 
 /** 读取 JSON 文件并容忍 UTF-8 BOM（外部工具如 PowerShell 可能写入 BOM）。 */
 function readJsonFile(path: string): unknown {
-  let raw = readFileSync(path, "utf8");
-  if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
-  return JSON.parse(raw);
+  return JSON.parse(stripBom(readFileSync(path, "utf8")));
 }
 
 /**
@@ -114,38 +139,30 @@ function resolveAuthPath(): string {
   candidates.push(join(home, ".local", "share", "opencode", "auth.json"));
   candidates.push(join(home, ".opencode", "auth.json"));
 
-  const existing: string[] = [];
+  // 一次遍历：既记首个存在的文件，也优先返回「含 opencode-go 字段」者
+  let firstExisting: string | null = null;
   for (const c of candidates) {
+    let exists = false;
+    let parsed: unknown;
     try {
-      if (existsSync(c)) existing.push(c);
+      exists = existsSync(c);
+      if (exists) parsed = readJsonFile(c);
     } catch {
-      /* ignore */
+      /* 解析失败：仍算存在，但不作为优先项 */
     }
+    if (!exists) continue;
+    if (firstExisting === null) firstExisting = c;
+    if (hasAuthField(parsed)) return c;
   }
-  if (existing.length === 0) return candidates[0];
-  for (const c of existing) {
-    try {
-      const parsed = readJsonFile(c);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed) &&
-        (parsed as Record<string, unknown>)[AUTH_FIELD]
-      ) {
-        return c;
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  return existing[0];
+  if (firstExisting !== null) return firstExisting;
+  return candidates[0];
 }
 
 /** 备份保留最近 N 份，清理更旧的 */
 function pruneBackups(target: string, keep: number): void {
   try {
     const dir = dirname(target);
-    const prefix = basename(target) + ".tokenhub.bak-";
+    const prefix = basename(target) + BACKUP_TAG;
     const entries = readdirSync(dir)
       .filter((n) => n.startsWith(prefix))
       .sort()
@@ -176,24 +193,20 @@ function tryRestoreAuthFile(
   backupPath: string | null,
   existed: boolean,
 ): { ok: boolean; hint?: string } {
-  const failMsg = (): string =>
-    existsSync(backupPath ?? "")
-      ? `恢复失败，状态待确认；备份位于 ${backupPath}`
-      : "恢复失败，状态待确认";
   if (backupPath && existsSync(backupPath)) {
     let backupBytes: Buffer;
     try {
       backupBytes = readFileSync(backupPath);
     } catch {
-      return { ok: false, hint: failMsg() };
+      return { ok: false, hint: restoreFailedHint(backupPath) };
     }
     // 备份必须可解析（不可解析 → 明确失败，不判成功）
     try {
-      JSON.parse(backupBytes.toString("utf8").replace(/^\uFEFF/, ""));
+      JSON.parse(stripBom(backupBytes.toString("utf8")));
     } catch {
-      return { ok: false, hint: failMsg() };
+      return { ok: false, hint: restoreFailedHint(backupPath) };
     }
-    const tmp = `${target}.tokenhub.restoretmp-${randomBytes(4).toString("hex")}`;
+    const tmp = siblingName(target, RESTORE_TMP_TAG);
     try {
       copyFileSync(backupPath, tmp);
       renameSync(tmp, target);
@@ -203,22 +216,14 @@ function tryRestoreAuthFile(
       } catch {
         /* ignore */
       }
-      return {
-        ok: false,
-        hint: existsSync(backupPath)
-          ? `恢复失败，状态待确认；备份位于 ${backupPath}`
-          : `恢复失败，状态待确认（${e instanceof Error ? e.message : String(e)}）`,
-      };
+      return { ok: false, hint: restoreFailedHint(backupPath, errText(e)) };
     }
     try {
-      const nowBytes = readFileSync(target);
-      if (nowBytes.equals(backupBytes)) {
-        return { ok: true };
-      }
+      if (readFileSync(target).equals(backupBytes)) return { ok: true };
     } catch {
       /* fallthrough */
     }
-    return { ok: false, hint: failMsg() };
+    return { ok: false, hint: restoreFailedHint(backupPath) };
   }
   if (!existed) {
     try {
@@ -227,7 +232,6 @@ function tryRestoreAuthFile(
     } catch {
       /* fallthrough */
     }
-    return { ok: false, hint: "恢复失败，状态待确认" };
   }
   return { ok: false, hint: "恢复失败，状态待确认" };
 }
@@ -256,14 +260,14 @@ function writeAuthFile(key: string): SwitchResult {
     return {
       ok: false,
       method: "file",
-      error: `读取 auth.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+      error: `读取 auth.json 失败: ${errText(e)}`,
     };
   }
 
   try {
     if (existed) {
       const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      backupPath = `${target}.tokenhub.bak-${ts}`;
+      backupPath = target + BACKUP_TAG + ts;
       copyFileSync(target, backupPath);
       pruneBackups(target, BACKUP_KEEP);
     } else {
@@ -273,13 +277,13 @@ function writeAuthFile(key: string): SwitchResult {
     return {
       ok: false,
       method: "file",
-      error: `备份 auth.json 失败: ${e instanceof Error ? e.message : String(e)}`,
+      error: `备份 auth.json 失败: ${errText(e)}`,
     };
   }
 
   data[AUTH_FIELD] = { type: "api", key };
 
-  const tmp = `${target}.tokenhub.tmp-${randomBytes(4).toString("hex")}`;
+  const tmp = siblingName(target, TMP_TAG);
   try {
     writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
     renameSync(tmp, target);
@@ -293,7 +297,7 @@ function writeAuthFile(key: string): SwitchResult {
     return {
       ok: false,
       method: "file",
-      error: `写入 auth.json 失败，原账号未受影响: ${e instanceof Error ? e.message : String(e)}`,
+      error: `写入 auth.json 失败，原账号未受影响: ${errText(e)}`,
     };
   }
 
@@ -306,7 +310,7 @@ function writeAuthFile(key: string): SwitchResult {
     }
   } catch (e) {
     const restore = tryRestoreAuthFile(target, backupPath, existed);
-    const detail = e instanceof Error ? e.message : String(e);
+    const detail = errText(e);
     if (restore.ok) {
       return {
         ok: false,
@@ -367,12 +371,14 @@ function sendJson(res: ServerResponse, code: number, obj: unknown): void {
   }
 }
 
-/** POST /switch：校验 token + key（sk- 或 oc_sk_ 开头）→ API 优先 → 文件兜底 */
-function handleSwitch(req: IncomingMessage, res: ServerResponse, input: PluginInput): void {
+/** §7.8：按字节累计请求体；超限立即停止拼接（丢弃后续数据），由调用方判定 overflow。 */
+function collectBody(
+  req: IncomingMessage,
+  onDone: (raw: string, overflow: boolean) => void,
+): void {
   let raw = "";
   let totalBytes = 0;
   let overflow = false;
-  // §7.8：按字节累计；超限立即停止拼接（丢弃后续数据），end 时明确拒绝 413
   req.on("data", (chunk: Buffer) => {
     totalBytes += chunk.length;
     if (totalBytes > MAX_BODY_BYTES) {
@@ -381,48 +387,54 @@ function handleSwitch(req: IncomingMessage, res: ServerResponse, input: PluginIn
     }
     raw += chunk.toString("utf8");
   });
-  req.on("end", () => {
-    void (async () => {
-      if (overflow) {
-        sendJson(res, 413, { ok: false, error: "body too large" });
-        return;
-      }
-      let body: { key?: unknown };
-      try {
-        body = JSON.parse(raw || "{}") as { key?: unknown };
-      } catch {
-        sendJson(res, 400, { ok: false, error: "invalid JSON" });
-        return;
-      }
-      const key = body?.key;
-      if (typeof key !== "string" || !isValidKey(key)) {
-        sendJson(res, 400, { ok: false, error: "key 必须以 sk- 或 oc_sk_ 开头" });
-        return;
-      }
-      const ok = await apiSwitch(input.serverUrl, key);
-      if (ok) {
-        sendJson(res, 200, { ok: true, method: "api" });
-        return;
-      }
-      const result = writeAuthFile(key);
-      if (result.ok) {
-        sendJson(res, 200, { ok: true, method: "file" });
-      } else {
-        sendJson(res, 200, {
-          ok: false,
-          method: "file",
-          error: result.error ?? "未知错误",
-        });
-      }
-    })().catch((e) => {
-      sendJson(res, 500, {
-        ok: false,
-        error: `switch failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    });
-  });
+  req.on("end", () => onDone(raw, overflow));
   req.on("error", () => {
     /* ignore */
+  });
+}
+
+/** 校验密钥（sk- 或 oc_sk_ 开头）→ API 优先 → 文件兜底；状态码与文案保持不变。 */
+async function respondSwitch(
+  res: ServerResponse,
+  input: PluginInput,
+  raw: string,
+): Promise<void> {
+  let body: { key?: unknown };
+  try {
+    body = JSON.parse(raw || "{}") as { key?: unknown };
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid JSON" });
+    return;
+  }
+  const key = body?.key;
+  if (typeof key !== "string" || !isValidKey(key)) {
+    sendJson(res, 400, { ok: false, error: "key 必须以 sk- 或 oc_sk_ 开头" });
+    return;
+  }
+  if (await apiSwitch(input.serverUrl, key)) {
+    sendJson(res, 200, { ok: true, method: "api" });
+    return;
+  }
+  const result = writeAuthFile(key);
+  sendJson(
+    res,
+    200,
+    result.ok
+      ? { ok: true, method: "file" }
+      : { ok: false, method: "file", error: result.error ?? "未知错误" },
+  );
+}
+
+/** POST /switch（token 已在 server 层校验）：读体 → 校验 → 切换。 */
+function handleSwitch(req: IncomingMessage, res: ServerResponse, input: PluginInput): void {
+  collectBody(req, (raw, overflow) => {
+    if (overflow) {
+      sendJson(res, 413, { ok: false, error: "body too large" });
+      return;
+    }
+    void respondSwitch(res, input, raw).catch((e) => {
+      sendJson(res, 500, { ok: false, error: `switch failed: ${errText(e)}` });
+    });
   });
 }
 
@@ -495,7 +507,7 @@ export const TokenHub = async (input: PluginInput): Promise<Record<string, unkno
           console.log(`[tokenhub] 已启动 TokenHub.exe（控制端口 ${port}）`);
         } catch (e) {
           console.error(
-            `[tokenhub] spawn TokenHub.exe 失败: ${e instanceof Error ? e.message : String(e)}`,
+            `[tokenhub] spawn TokenHub.exe 失败: ${errText(e)}`,
           );
           child = null;
         }
@@ -513,7 +525,7 @@ export const TokenHub = async (input: PluginInput): Promise<Record<string, unkno
           server.close();
         } catch (e) {
           console.error(
-            `[tokenhub] 关闭控制服务器失败: ${e instanceof Error ? e.message : String(e)}`,
+            `[tokenhub] 关闭控制服务器失败: ${errText(e)}`,
           );
         }
         if (child) {
@@ -521,7 +533,7 @@ export const TokenHub = async (input: PluginInput): Promise<Record<string, unkno
             child.kill();
           } catch (e) {
             console.error(
-              `[tokenhub] 终止 TokenHub.exe 失败: ${e instanceof Error ? e.message : String(e)}`,
+              `[tokenhub] 终止 TokenHub.exe 失败: ${errText(e)}`,
             );
           }
         }
@@ -535,7 +547,7 @@ export const TokenHub = async (input: PluginInput): Promise<Record<string, unkno
     return hooks;
   } catch (e) {
     console.error(
-      `[tokenhub] 初始化失败（不影响 opencode 启动）: ${e instanceof Error ? e.message : String(e)}`,
+      `[tokenhub] 初始化失败（不影响 opencode 启动）: ${errText(e)}`,
     );
     return {};
   }

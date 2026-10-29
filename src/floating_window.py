@@ -134,6 +134,7 @@ class FloatingWindow:
     MIN_WIDTH = 620         # 行式布局面板宽度范围（尾部操作列加宽后上限放宽）
     MAX_WIDTH = 780
     BLOCK_PADX = 12         # 指标块左右内边距（每侧；文本居中，实际间距 ≥ 该值）
+    METRIC_GAP = 4          # 指标块内两段文字的水平间距
 
     def __init__(self, root: tk.Tk, theme_colors: dict,
                  on_switch: Callable, on_settings: Callable,
@@ -280,9 +281,7 @@ class FloatingWindow:
                                 height=self.STATUS_HEIGHT)
         self._status.pack_propagate(False)  # 防 pack 传播：保持 20px 显式高度
         self._status_shown = False
-        self._status_label = tk.Label(self._status, text='', font=(self.FONT, 8),
-                                      bg=self.c['bg'], fg=self.c['sub'],
-                                      bd=0, highlightthickness=0, padx=0, pady=0)
+        self._status_label = self._label(self._status, '', (self.FONT, 8), self.c['sub'])
         self._status_label.pack(fill=tk.X)  # 文本水平居中
         # U02：点击状态行 → 复制完整消息 + on_status_click 回调
         self._status_label.bind('<Button-1>', self._on_status_click)
@@ -324,15 +323,9 @@ class FloatingWindow:
         self._cd_due = {}          # 归零上报状态一并重置（新数据到来后重新计数）
         current, current_usage, backups = self._data
 
-        row_idx = 0
-        if current is not None:
-            self._build_row(row_idx, current, current_usage, is_current=True)
-        else:
-            self._build_row(row_idx, None, None, is_current=True)
-        row_idx += 1
-        for account, usage in (backups or []):
+        self._build_row(0, current, current_usage, is_current=True)
+        for row_idx, (account, usage) in enumerate(backups or [], start=1):
             self._build_row(row_idx, account, usage, is_current=False)
-            row_idx += 1
         self._apply_switching(self._switching_key)
 
     def _build_row(self, row_idx: int, account, usage, is_current: bool) -> None:
@@ -343,7 +336,24 @@ class FloatingWindow:
             label = '未检测到当前账号' if is_current else '未命名'
         offline = usage is None or self._usage_offline(usage)
 
-        # ---- 账户区（Label，单行，垂直居中） ----
+        self._build_identity(row_idx, key, label, is_current, offline)
+        # ---- 块间 1px 细竖分隔线 ----
+        for col in (1, 3, 5, 7):
+            tk.Frame(self._rows, bg=self.c['separator'], width=1).grid(
+                row=row_idx, column=col, sticky='ns')
+        for j, (metric_key, label_text) in enumerate(self.METRIC_LABELS):
+            self._build_metric_block(row_idx, j, metric_key, label_text,
+                                     usage, offline, key)
+        self._build_tail(row_idx, key, label, is_current)
+
+    def _label(self, parent, text: str, font, fg: str) -> tk.Label:
+        """统一样式的单行 Label（无边框 / 无焦点高亮 / 无内边距）。"""
+        return tk.Label(parent, text=text, font=font, bg=self.c['bg'], fg=fg,
+                        bd=0, highlightthickness=0, padx=0, pady=0)
+
+    def _build_identity(self, row_idx: int, key: str, label: str,
+                        is_current: bool, offline: bool) -> None:
+        """账户区（Label，单行，垂直居中）：状态点 + 名称 + [使用中] + 掩码。"""
         ident = tk.Frame(self._rows, bg=self._trans)
         ident.grid(row=row_idx, column=0, sticky='nsew', padx=(12, 8))
         inner = tk.Frame(ident, bg=self._trans)
@@ -352,7 +362,8 @@ class FloatingWindow:
                  font=(self.FONT, 10, 'bold'), bg=self._trans,
                  fg=self.c['accent'] if is_current else self.c['sub']).pack(side=tk.LEFT)
         tk.Label(inner, text=label, font=(self.FONT, 10, 'bold'), bg=self._trans,
-                 fg=self.c['offline'] if offline else self.c['fg']).pack(side=tk.LEFT, padx=(4, 0))
+                 fg=self.c['offline'] if offline else self.c['fg']).pack(
+            side=tk.LEFT, padx=(4, 0))
         if is_current:
             # U01：当前账号「使用中」chip（accent 弱底小标签）
             tk.Label(inner, text='使用中', font=(self.FONT, 8), bg=self.c['card'],
@@ -361,119 +372,116 @@ class FloatingWindow:
         tk.Label(inner, text=self._mask(key), font=(self.FONT, 9), bg=self._trans,
                  fg=self.c['offline']).pack(side=tk.LEFT, padx=(6, 0))
 
-        # ---- 块间 1px 细竖分隔线 ----
-        for col in (1, 3, 5, 7):
-            tk.Frame(self._rows, bg=self.c['separator'], width=1).grid(
-                row=row_idx, column=col, sticky='ns')
+    @staticmethod
+    def _metric_percent(metric):
+        return getattr(metric, 'percent', None) if metric is not None else None
 
-        # ---- 三个指标块（Frame + 两行 Label 控件渲染，弹性均分填满） ----
-        # 渲染路径说明：Canvas.create_text 在 Windows 上走不同 GDI 路径，
-        # 同字体同字号下明显发虚（用户 2x 实拍对比确认）；Label 控件渲染
-        # 锐利，与 [新增] 按钮同路径。面板内部背景统一 c['bg'] 实色
-        # （无透明键），圆角由 SetWindowRgn 窗口级裁切（见 _apply_region）。
-        # 块 Frame 显式 width = 两行文本实测宽取较大者 + 4px（Font.measure
-        # 与 Label 同字体同源，保留内容驱动：grid 列自然宽 → 面板 620–780 自适应）
-        for j, (metric_key, label_text) in enumerate(self.METRIC_LABELS):
-            m = self._metric(usage, metric_key)
-            percent = getattr(m, 'percent', None) if m is not None else None
-            err = getattr(m, 'error', None) if m is not None else None
-            if offline:
-                # 整行离线（无任何有效指标）：上行=标签、下行=「离线」（无 ⟳）
-                pct_text = ''
-                cd_text = '离线'
-                icon = False
-                err_state = False
-            elif err:
-                # U03：单项指标错误 → 上行=标签+状态短文案，下行=⟳ 倒计时
-                # （其他指标照常显示；文案映射见 _metric_error_text）
-                pct_text = self._metric_error_text(err)
-                cd_text = self._format_countdown(getattr(m, 'resets_at', None))
-                icon = True
-                err_state = True
-            else:
-                pct_text = f'{percent}%' if percent is not None else '--'
-                cd_text = self._format_countdown(getattr(m, 'resets_at', None))
-                icon = True
-                err_state = False
+    @staticmethod
+    def _metric_error(metric):
+        return getattr(metric, 'error', None) if metric is not None else None
 
-            # 两行各自测宽 → 块 Frame 请求宽 = 两行较大者 + 2×BLOCK_PADX（gap=4 段间距）；
-            # 左右内边距保证文本与块边界/分隔线的间距（请求宽增大后 _relayout
-            # 的 req_w 超 620 → 面板自动放宽、grid 不压缩，padx 完整生效；
-            # 780 下居中余量更大，实际间距 ≥ BLOCK_PADX）
-            gap = 4
-            lw = self._f_sec.measure(label_text)
-            # 状态短文案用 9pt（与标签同字号）测量与绘制；百分比用 11pt bold
+    def _countdown(self, metric) -> str:
+        """指标 → 重置倒计时文本（无指标 / 无 resetsAt → '--'）。"""
+        return self._format_countdown(
+            getattr(metric, 'resets_at', None) if metric is not None else None)
+
+    def _metric_display(self, usage, metric_key: str, offline: bool):
+        """指标块两行文案：返回 (percent, pct_text, cd_text, icon, err_state)。"""
+        m = self._metric(usage, metric_key)
+        percent = self._metric_percent(m)
+        err = self._metric_error(m)
+        if offline:
+            # 整行离线（无任何有效指标）：上行=标签、下行=「离线」（无 ⟳）
+            return percent, '', '离线', False, False
+        if err:
+            # U03：单项指标错误 → 上行=标签+状态短文案，下行=⟳ 倒计时
+            # （其他指标照常显示；文案映射见 _metric_error_text）
+            return percent, self._metric_error_text(err), self._countdown(m), True, True
+        return (percent, f'{percent}%' if percent is not None else '--',
+                self._countdown(m), True, False)
+
+    def _block_width(self, label_text: str, pct_text: str, cd_text: str,
+                     icon: bool, err_state: bool) -> int:
+        """块请求宽 = 两行实测宽较大者 + 2×BLOCK_PADX。
+
+        Font.measure 与 Label 同字体同源，保留内容驱动：grid 列自然宽 →
+        面板 620–780 自适应。"""
+        gap = self.METRIC_GAP
+        lw = self._f_sec.measure(label_text)
+        # 状态短文案用 9pt（与标签同字号）测量；百分比用 11pt bold
+        if pct_text:
             pw = (self._f_sec.measure(pct_text) if err_state
-                  else self._f_pct.measure(pct_text)) if pct_text else 0
-            iw = self._f_sec.measure('⟳') if icon else 0
-            cw = self._f_sec.measure(cd_text)
-            w_top = lw + (gap + pw if pw else 0)
-            w_bot = iw + (gap + cw if icon else 0) if icon else cw
-            total = max(w_top, w_bot)
+                  else self._f_pct.measure(pct_text))
+        else:
+            pw = 0
+        iw = self._f_sec.measure('⟳') if icon else 0
+        cw = self._f_sec.measure(cd_text)
+        w_top = lw + (gap + pw if pw else 0)
+        w_bot = iw + (gap + cw) if icon else cw
+        return int(max(w_top, w_bot)) + 2 * self.BLOCK_PADX
 
-            block = tk.Frame(self._rows, bg=self.c['bg'],
-                             width=int(total) + 2 * self.BLOCK_PADX,
-                             height=self.ROW_HEIGHT)
-            block.grid(row=row_idx, column=2 + j * 2, sticky='nsew')
+    def _build_metric_block(self, row_idx: int, j: int, metric_key: str,
+                            label_text: str, usage, offline: bool, key: str) -> None:
+        """单个指标块（Frame + 两行 Label 控件渲染，弹性均分填满）。
 
-            # 行高 54px：两行中心 y=15 / y=41（11pt bold 字形盒上探12/下探13、
-            # 9pt 上探10/下探10，167% DPI 实测 → 字形盒 3..28 / 31..51，
-            # 上边距3px、下边距3px、两行间隙3px）；place 相对块宽水平居中
-            bg = self.c['bg']
-            top = tk.Frame(block, bg=bg)
-            top.place(relx=0.5, y=15, anchor='center')
-            lbl_label = tk.Label(top, text=label_text, font=self._f_sec, bg=bg,
-                                 fg=self.c['offline'] if offline else self.c['sub'],
-                                 bd=0, highlightthickness=0, padx=0, pady=0)
-            lbl_label.pack(side=tk.LEFT)
-            lbl_pct = None
-            if pct_text:
-                # 错误状态文案：9pt + offline 可读色；正常百分比：11pt bold 阈值色
-                lbl_pct = tk.Label(top, text=pct_text,
-                                   font=self._f_sec if err_state else self._f_pct,
-                                   bg=bg,
-                                   fg=self.c['offline'] if (err_state or percent is None)
-                                   else self._pct_color(percent),
-                                   bd=0, highlightthickness=0, padx=0, pady=0)
-                lbl_pct.pack(side=tk.LEFT, padx=(gap, 0))
-            bot = tk.Frame(block, bg=bg)
-            bot.place(relx=0.5, y=41, anchor='center')
-            lbl_icon = None
-            if icon:
-                lbl_icon = tk.Label(bot, text='⟳', font=self._f_sec, bg=bg,
-                                    fg=self.c['offline'] if offline else self.c['sub'],
-                                    bd=0, highlightthickness=0, padx=0, pady=0)
-                lbl_icon.pack(side=tk.LEFT)
-            lbl_cd = tk.Label(bot, text=cd_text, font=self._f_sec, bg=bg,
-                              fg=self.c['offline'] if offline else self.c['sub'],
-                              bd=0, highlightthickness=0, padx=0, pady=0)
-            lbl_cd.pack(side=tk.LEFT, padx=(gap, 0) if icon else (0, 0))
+        渲染路径说明：Canvas.create_text 在 Windows 上走不同 GDI 路径，同字体
+        同字号下明显发虚（用户 2x 实拍对比确认）；Label 控件渲染锐利，与
+        [新增] 按钮同路径。面板内部背景统一 c['bg'] 实色（无透明键），圆角由
+        SetWindowRgn 窗口级裁切（见 _apply_region）。"""
+        percent, pct_text, cd_text, icon, err_state = self._metric_display(
+            usage, metric_key, offline)
+        gap = self.METRIC_GAP
+        block = tk.Frame(self._rows, bg=self.c['bg'],
+                         width=self._block_width(label_text, pct_text, cd_text,
+                                                 icon, err_state),
+                         height=self.ROW_HEIGHT)
+        block.grid(row=row_idx, column=2 + j * 2, sticky='nsew')
 
-            # TH-08：update 每次调用重算倒计时文本（ticker 每秒调用），
-            # 只 configure(text=...) 更新，不重建账号行；整行离线块结构固定
-            def update(_blk=block, _u=usage, _mk=metric_key, _off=offline,
-                       _err=err_state, _lp=lbl_pct, _lc=lbl_cd):
-                if _off:
-                    return
-                m = self._metric(_u, _mk)
-                if _err:
-                    # U03：错误块上行状态文案固定，只更新倒计时（若有）
-                    _lc.configure(text=self._format_countdown(
-                        getattr(m, 'resets_at', None)))
-                    return
-                percent = getattr(m, 'percent', None) if m is not None else None
-                pct_text = f'{percent}%' if percent is not None else '--'
-                cd_text = self._format_countdown(getattr(m, 'resets_at', None))
-                _lp.configure(text=pct_text,
-                              fg=self.c['offline'] if percent is None
-                              else self._pct_color(percent))
-                _lc.configure(text=cd_text)
+        # 行高 54px：两行中心 y=15 / y=41（11pt bold 字形盒上探12/下探13、
+        # 9pt 上探10/下探10，167% DPI 实测 → 字形盒 3..28 / 31..51，
+        # 上边距3px、下边距3px、两行间隙3px）；place 相对块宽水平居中
+        top = tk.Frame(block, bg=self.c['bg'])
+        top.place(relx=0.5, y=15, anchor='center')
+        sub_fg = self.c['offline'] if offline else self.c['sub']
+        self._label(top, label_text, self._f_sec, sub_fg).pack(side=tk.LEFT)
+        lbl_pct = None
+        if pct_text:
+            # 错误状态文案：9pt + offline 可读色；正常百分比：11pt bold 阈值色
+            lbl_pct = self._label(
+                top, pct_text, self._f_sec if err_state else self._f_pct,
+                self.c['offline'] if (err_state or percent is None)
+                else self._pct_color(percent))
+            lbl_pct.pack(side=tk.LEFT, padx=(gap, 0))
+        bot = tk.Frame(block, bg=self.c['bg'])
+        bot.place(relx=0.5, y=41, anchor='center')
+        if icon:
+            self._label(bot, '⟳', self._f_sec, sub_fg).pack(side=tk.LEFT)
+        lbl_cd = self._label(bot, cd_text, self._f_sec, sub_fg)
+        lbl_cd.pack(side=tk.LEFT, padx=(gap, 0) if icon else (0, 0))
 
-            self._metric_blocks.append({
-                'update': update, 'key': key, 'metric': metric_key,
-                'offline': offline, 'error': err_state, 'usage': usage})
+        # TH-08：update 每次调用重算倒计时文本（ticker 每秒调用），只
+        # configure(text=...) 更新，不重建账号行；整行离线块结构固定
+        def update(_u=usage, _mk=metric_key, _off=offline, _err=err_state,
+                   _lp=lbl_pct, _lc=lbl_cd):
+            if _off:
+                return
+            m = self._metric(_u, _mk)
+            if _err:
+                # U03：错误块上行状态文案固定，只更新倒计时（若有）
+                _lc.configure(text=self._countdown(m))
+                return
+            p = self._metric_percent(m)
+            _lp.configure(text=f'{p}%' if p is not None else '--',
+                          fg=self.c['offline'] if p is None else self._pct_color(p))
+            _lc.configure(text=self._countdown(m))
 
-        # ---- 尾部操作列（垂直居中）：当前行=[新增]；备用行=[切换][删除] ----
+        self._metric_blocks.append({
+            'update': update, 'key': key, 'metric': metric_key,
+            'offline': offline, 'error': err_state, 'usage': usage})
+
+    def _build_tail(self, row_idx: int, key: str, label: str,
+                    is_current: bool) -> None:
+        """尾部操作列（垂直居中）：当前行=[新增]；备用行=[切换][删除]（+ 增删按钮驱动列宽）。"""
         tail = tk.Frame(self._rows, bg=self._trans)
         tail.grid(row=row_idx, column=8, sticky='nsew', padx=(8, 12))
         tinner = tk.Frame(tail, bg=self._trans)
@@ -486,9 +494,9 @@ class FloatingWindow:
             add_btn.pack(side=tk.LEFT)
             row_btns['add'] = add_btn
         else:
-            sw_btn = self._make_tail_button(tinner, '切换',
-                                            lambda k=key: self._on_switch_click(k),
-                                            fg=self.c['accent'])
+            sw_btn = self._make_tail_button(
+                tinner, '切换', lambda k=key: self._on_switch_click(k),
+                fg=self.c['accent'])
             sw_btn.pack(side=tk.LEFT)
             row_btns['switch'] = sw_btn
             self._switch_buttons[key] = sw_btn
@@ -738,6 +746,11 @@ class FloatingWindow:
             self._cancel_job(self._follow_up_job)
             self._follow_up_job = None
 
+    def _kind_color(self, kind: str) -> str:
+        """消息种类 → 前景色（success / error / 其余按 info）。"""
+        return {'success': self.c['ok'], 'error': self.c['warn'],
+                'info': self.c['accent']}.get(kind, self.c['accent'])
+
     def _show_message(self, text: str, kind: str, duration_ms: Optional[int] = None) -> None:
         """pack 状态行（高度加入）→ 设置文本（长文本单行截断，完整文本
         存 _status_full_text 供点击复制）→ 绘制。"""
@@ -747,8 +760,7 @@ class FloatingWindow:
             duration_ms if duration_ms is not None else self.TOAST_MS) / 1000.0
         self._status_full_text = text
         self._hint_text = self._fit_text(text, self._f_sec)
-        self._hint_color = {'success': self.c['ok'], 'error': self.c['warn'],
-                            'info': self.c['accent']}.get(kind, self.c['accent'])
+        self._hint_color = self._kind_color(kind)
         self._show_status_row()  # 先加高度（无消息时不占高度）
         self._draw_status()
 
@@ -794,8 +806,7 @@ class FloatingWindow:
         job_attr 指定当前段的定时器槽（取消/替换时清理）。"""
         setattr(self, job_attr, None)
         start = time.time()
-        base = {'success': self.c['ok'], 'error': self.c['warn'],
-                'info': self.c['accent']}.get(self._toast_kind, self.c['accent'])
+        base = self._kind_color(self._toast_kind)
 
         def step():
             t = min((time.time() - start) / (self.TOAST_FADE_MS / 1000.0), 1.0)
@@ -808,11 +819,15 @@ class FloatingWindow:
                 on_done()
         step()
 
+    def _end_segment(self) -> None:
+        """当前消息段结束：清空临时文本、退出 transient 态。"""
+        self._toast_text = ''
+        self._transient_active = False
+
     def _on_first_done(self) -> None:
         """第一段淡出完成：有 follow_up → 立即显示（时长 follow_up[1]，
         其自身按普通消息淡出）；否则按普通收尾。"""
-        self._toast_text = ''
-        self._transient_active = False
+        self._end_segment()
         fu = self._follow_up
         self._follow_up = None
         if fu:
@@ -824,8 +839,7 @@ class FloatingWindow:
 
     def _on_plain_done(self) -> None:
         """follow_up 段淡出完成：普通收尾（无二级 follow_up）。"""
-        self._toast_text = ''
-        self._transient_active = False
+        self._end_segment()
         self._finish_plain()
 
     def _finish_plain(self) -> None:

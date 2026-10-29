@@ -68,18 +68,20 @@ def log_startup():
     logger.info("=" * 60)
 
 
-def log_config_load(account_count=None):
+def _log_with_count(message: str, account_count=None):
+    """带账号数的配置日志：account_count 为 None 时省略数量。"""
     if account_count is None:
-        logger.info("配置加载完成")
+        logger.info(message)
     else:
-        logger.info(f"配置加载完成 - 账号数: {account_count}")
+        logger.info(f"{message} - 账号数: {account_count}")
+
+
+def log_config_load(account_count=None):
+    _log_with_count("配置加载完成", account_count)
 
 
 def log_config_save(account_count=None):
-    if account_count is None:
-        logger.info("配置已保存")
-    else:
-        logger.info(f"配置已保存 - 账号数: {account_count}")
+    _log_with_count("配置已保存", account_count)
 
 
 def log_api_request(url: str):

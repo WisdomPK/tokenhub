@@ -58,6 +58,8 @@ STICKY_AUTO_CHECK_SECONDS = 5.0  # U02：auto sticky 判定节流
 
 class TokenHubApp:
     TICK_MS = 100
+    # U02：sticky 优先级 config > switch > tray > auto（高优先级占位时低优先级不替换）
+    STICKY_PRIORITY = {"config": 3, "switch": 2, "tray": 1, "auto": 0}
 
     def __init__(self):
         # 核心模块（按 plan Task A 规格）
@@ -200,6 +202,37 @@ class TokenHubApp:
             self.root.after(self.TICK_MS, self._tick)
 
     def _update_position_and_visibility(self):
+        hwnd = self._track_target()
+        if hwnd is None:
+            if (self.cfg.settings.get("fallback_screen_edge", True)
+                    and not self.tracker.is_opencode_running()):
+                # 仅当 opencode 进程未运行才顶边回退；仅最小化（进程在运行）不回退
+                self._fallback_screen_edge()
+            else:
+                # 无窗口：隐藏；手动显示/弹窗打开期间保持
+                self._apply_visibility(
+                    self._manual_visible or self.win.is_modal_open())
+            return
+        rect = self.tracker.get_rect(hwnd)
+        if rect is None:
+            self._apply_visibility(self._manual_visible)
+            return
+        mx, my = self.tracker.get_cursor_pos() or (0, 0)
+        offset = int(self.cfg.settings.get("hotzone_offset", 48))
+        x, yv = self.tracker.bar_geometry(
+            rect, self.win.width, self.win.height, True, offset=offset)
+        # 隐藏位 = 所在显示器工作区上缘上方（work_area.top - bar_h，
+        # 由 window_tracker.bar_geometry 计算）
+        _, yh = self.tracker.bar_geometry(rect, self.win.width, self.win.height, False)
+        self.win.update_position(x, yv, yh)
+        # 可见状态统一：热区 / 面板内 / 手动显示（托盘）/ 弹窗打开期间保持显示
+        self._apply_visibility(
+            self._hotzone_active(rect, hwnd, mx, my, offset)
+            or self._panel_contains(mx, my, x, yv)
+            or self._manual_visible or self.win.is_modal_open())
+
+    def _track_target(self):
+        """当前跟踪的 opencode 窗口句柄；失效立即重找（节流 1s），无则 None。"""
         hwnd = self._hwnd
         if hwnd is not None and not self.tracker.is_valid(hwnd):
             # 缓存窗口失效（含最小化）：立即视为无窗口，不再用失效窗口走正常分支
@@ -211,44 +244,25 @@ class TokenHubApp:
                 self._last_find = now
                 self._hwnd = self.tracker.find_opencode_window()
                 hwnd = self._hwnd
-        if hwnd is not None and self.tracker.is_valid(hwnd):
-            rect = self.tracker.get_rect(hwnd)
-            if rect is None:
-                self._apply_visibility(self._manual_visible)
-                return
-            mx, my = self.tracker.get_cursor_pos() or (0, 0)
-            offset = int(self.cfg.settings.get("hotzone_offset", 48))
-            x, yv = self.tracker.bar_geometry(
-                rect, self.win.width, self.win.height, True, offset=offset
-            )
-            # 隐藏位 = 所在显示器工作区上缘上方（work_area.top - bar_h，由 window_tracker.bar_geometry 计算）
-            _, yh = self.tracker.bar_geometry(rect, self.win.width, self.win.height, False)
-            self.win.update_position(x, yv, yh)
-            # 热区必须位于 opencode 窗口之上（鼠标下方确实是该窗口才响应）：
-            # 其他应用（或最小化残留坐标）盖在热区位置时不唤出
-            in_hot = self.tracker.in_hotzone(
-                rect,
-                int(self.cfg.settings["hotzone_height"]),
-                float(self.cfg.settings["hotzone_width_ratio"]),
-                mx, my,
-                offset=offset,
-            ) and self.tracker.is_point_over_window(hwnd, mx, my)
-            # TH-09：隐藏时面板区域不参与唤出；已显示时用面板区域保持显示
-            inside = (
-                self.win.is_visible()
+        if hwnd is None:
+            return None
+        return hwnd if self.tracker.is_valid(hwnd) else None
+
+    def _hotzone_active(self, rect, hwnd, mx: int, my: int, offset: int) -> bool:
+        """热区命中判定：鼠标下方必须确实是该窗口（其他应用/最小化残留坐标不唤出）。"""
+        return self.tracker.in_hotzone(
+            rect,
+            int(self.cfg.settings["hotzone_height"]),
+            float(self.cfg.settings["hotzone_width_ratio"]),
+            mx, my,
+            offset=offset,
+        ) and self.tracker.is_point_over_window(hwnd, mx, my)
+
+    def _panel_contains(self, mx: int, my: int, x: int, top: int) -> bool:
+        """鼠标是否落在已展开的面板范围内（TH-09：隐藏时面板区域不参与唤出）。"""
+        return (self.win.is_visible()
                 and x <= mx <= x + self.win.width
-                and yv <= my <= yv + self.win.height
-            )
-            # 可见状态统一：手动显示模式（托盘）/弹窗打开期间（is_modal_open）保持显示
-            modal = self.win.is_modal_open()
-            self._apply_visibility(in_hot or inside or self._manual_visible or modal)
-        elif (self.cfg.settings.get("fallback_screen_edge", True)
-              and not self.tracker.is_opencode_running()):
-            # 仅当 opencode 进程未运行才顶边回退；仅最小化（进程在运行）不回退
-            self._fallback_screen_edge()
-        else:
-            # 无窗口：隐藏；手动显示/弹窗打开期间保持
-            self._apply_visibility(self._manual_visible or self.win.is_modal_open())
+                and top <= my <= top + self.win.height)
 
     def _fallback_screen_edge(self):
         """无窗口回退：屏幕顶边 10px、居中 720px 热区；面板 yv=0、yh=-height。"""
@@ -261,47 +275,45 @@ class TokenHubApp:
             (sw // 2 - half) <= mx <= (sw // 2 + half)
             and 0 <= my < int(self.cfg.settings["hotzone_height"])
         )
-        inside = (
-            self.win.is_visible()
-            and x <= mx <= x + self.win.width
-            and 0 <= my <= self.win.height
-        )
         # 弹窗打开期间同样保持显示（屏幕顶边回退模式）
         self._apply_visibility(
-            in_hot or inside or self._manual_visible or self.win.is_modal_open())
+            in_hot or self._panel_contains(mx, my, x, 0)
+            or self._manual_visible or self.win.is_modal_open())
 
     def _apply_visibility(self, should_show: bool):
         now = time.monotonic()
         if should_show:
             self._leave_since = None
             if not self._visible:
-                self._visible = True
-                self.win.set_visible(True)
-                self._sync_tray_visible(True)  # R2-05：状态同步到托盘（左键切换依据）
-                self._maybe_refresh_now()  # 展开前数据旧 → 即时刷新
-        else:
-            if self._visible:
-                if self._leave_since is None:
-                    self._leave_since = now
-                elif now - self._leave_since >= HIDE_DELAY_SECONDS:
-                    self._visible = False
-                    self._leave_since = None
-                    self.win.set_visible(False)
-                    self._sync_tray_visible(False)  # R2-05
+                self._enter_visible()
+        elif self._visible:
+            if self._leave_since is None:
+                self._leave_since = now
+            elif now - self._leave_since >= HIDE_DELAY_SECONDS:
+                self._exit_visible()
+
+    def _enter_visible(self) -> None:
+        """面板转为可见：状态、窗口、托盘同步，数据旧则即时刷新。"""
+        self._visible = True
+        self.win.set_visible(True)
+        self._sync_tray_visible(True)  # R2-05：状态同步到托盘（左键切换依据）
+        self._maybe_refresh_now()  # 展开前数据旧 → 即时刷新
+
+    def _exit_visible(self) -> None:
+        """面板转为隐藏：状态、窗口、托盘同步（离开计时清零）。"""
+        self._visible = False
+        self._leave_since = None
+        self.win.set_visible(False)
+        self._sync_tray_visible(False)  # R2-05
 
     def set_manual_visible(self, visible: bool):
         """托盘手动显示/隐藏：手动显示后不随鼠标离开收起；隐藏后悬停逻辑照旧生效。"""
         self._manual_visible = visible
         self._leave_since = None
         if visible:
-            self._visible = True
-            self.win.set_visible(True)
-            self._sync_tray_visible(True)  # R2-05
-            self._maybe_refresh_now()  # 手动展开前数据旧 → 即时刷新
+            self._enter_visible()
         else:
-            self._visible = False
-            self.win.set_visible(False)
-            self._sync_tray_visible(False)  # R2-05
+            self._exit_visible()
 
     def _sync_tray_visible(self, visible: bool) -> None:
         """R2-05：托盘左键切换依据 = 主程序实际可见态（托盘创建后同步，失败静默）。"""
@@ -383,7 +395,7 @@ class TokenHubApp:
         高优先级已占用时低优先级不替换（手动类不被 auto 覆盖）；
         auto 类同文本周期性去重（不重复设置）。
         """
-        priority = {"config": 3, "switch": 2, "tray": 1, "auto": 0}
+        priority = self.STICKY_PRIORITY
         cur = self._sticky_reason
         if cur is not None and priority.get(reason, 0) < priority.get(cur, 0):
             return

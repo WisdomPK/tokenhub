@@ -27,6 +27,7 @@ class SettingsWindow:
     """设置窗口（普通可聚焦对话框）。"""
 
     WINDOW_WIDTH = 580
+    WINDOW_HEIGHT = 560
     FONT = 'Microsoft YaHei UI'
 
     _active: Optional['SettingsWindow'] = None  # 类级单例：重复打开复用
@@ -76,8 +77,71 @@ class SettingsWindow:
         sw = self.window.winfo_screenwidth()
         sh = self.window.winfo_screenheight()
         x = (sw - self.WINDOW_WIDTH) // 2
-        y = (sh - 560) // 2
-        self.window.geometry(f'{self.WINDOW_WIDTH}x560+{x}+{y}')
+        y = (sh - self.WINDOW_HEIGHT) // 2
+        self.window.geometry(
+            f'{self.WINDOW_WIDTH}x{self.WINDOW_HEIGHT}+{x}+{y}')
+
+    # ============ 控件工厂 ============
+
+    def _make_button(self, parent, text: str, command, *, style: str = '',
+                     font_size: int = 9, bold: bool = False,
+                     padx: Optional[int] = None, pady: Optional[int] = None,
+                     active_fg: Optional[str] = None) -> tk.Button:
+        """扁平按钮：统一 bd/relief/cursor 与三套配色（style='' / 'accent' / 'danger'）。"""
+        c = self.colors
+        if style == 'accent':
+            bg, fg, hover = c['accent'], c['bg'], c['bg']
+        elif style == 'danger':
+            bg, fg, hover = c['card'], c['warn'], c['warn']
+        else:
+            bg, fg, hover = c['card'], c['fg'], c['accent']
+        if active_fg is not None:
+            hover = active_fg
+        font = (self.FONT, font_size, 'bold') if bold else (self.FONT, font_size)
+        btn = tk.Button(parent, text=text, font=font, bd=0, relief='flat',
+                        cursor='hand2', bg=bg, fg=fg,
+                        activebackground=bg, activeforeground=hover,
+                        command=command)
+        if padx is not None:
+            btn.configure(padx=padx)
+        if pady is not None:
+            btn.configure(pady=pady)
+        return btn
+
+    def _make_entry(self, parent, *, width: Optional[int] = None,
+                    show: Optional[str] = None) -> tk.Entry:
+        """单行输入框：统一输入底色 / 高亮边框 / 光标色。"""
+        c = self.colors
+        entry = tk.Entry(parent, font=(self.FONT, 10), bg=c['input_bg'],
+                         fg=c['fg'], insertbackground=c['fg'], relief='flat',
+                         highlightthickness=1, highlightbackground=c['border'],
+                         highlightcolor=c['accent'])
+        if width is not None:
+            entry.configure(width=width)
+        if show is not None:
+            entry.configure(show=show)
+        return entry
+
+    def _make_spin(self, parent, lo: int, hi: int, value: int,
+                   *, step: int = 1) -> tk.Spinbox:
+        """整数微调框：统一底色 / 按钮底色，并预填当前值。"""
+        c = self.colors
+        spin = tk.Spinbox(parent, from_=lo, to=hi, increment=step,
+                          font=(self.FONT, 10), width=8, bg=c['input_bg'],
+                          fg=c['fg'], insertbackground=c['fg'],
+                          buttonbackground=c['card'], relief='flat')
+        spin.delete(0, 'end')
+        spin.insert(0, str(value))
+        return spin
+
+    def _find_account(self, key: str):
+        """按密钥查配置里的账号对象（找不到返回 None）。"""
+        accounts = getattr(self.config, 'accounts', []) or []
+        return next((a for a in accounts if getattr(a, 'key', '') == key), None)
+
+    def _notify_saved(self) -> None:
+        """账号/选项落盘后通知外部刷新（未注入回调时无操作）。"""
+        self._notify_saved()
 
     # ============ 构建 ============
 
@@ -110,42 +174,24 @@ class SettingsWindow:
         row1 = tk.Frame(add_frame, bg=bg)
         row1.pack(fill=tk.X, pady=(8, 0))
         tk.Label(row1, text='标签', font=(self.FONT, 9), bg=bg, fg=sub).pack(side=tk.LEFT)
-        self._label_entry = tk.Entry(row1, font=(self.FONT, 10),
-                                     bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                     relief='flat', highlightthickness=1,
-                                     highlightbackground=c['border'], highlightcolor=c['accent'])
+        self._label_entry = self._make_entry(row1)
         self._label_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
         row2 = tk.Frame(add_frame, bg=bg)
         row2.pack(fill=tk.X, pady=(6, 0))
         tk.Label(row2, text='密钥', font=(self.FONT, 9), bg=bg, fg=sub).pack(side=tk.LEFT)
-        self._key_entry = tk.Entry(row2, font=(self.FONT, 10),
-                                   bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                   relief='flat', highlightthickness=1,
-                                   highlightbackground=c['border'], highlightcolor=c['accent'],
-                                   show='●')  # U08：默认掩码
+        self._key_entry = self._make_entry(row2, show='●')  # U08：默认掩码
         self._key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
         self._key_visible = False
-        self._toggle_key_btn = tk.Button(row2, text='显示', font=(self.FONT, 9),
-                                         bd=0, relief='flat', cursor='hand2',
-                                         bg=c['card'], fg=fg,
-                                         activebackground=c['card'], activeforeground=c['accent'],
-                                         command=self._toggle_key)
+        self._toggle_key_btn = self._make_button(row2, '显示', self._toggle_key)
         self._toggle_key_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         row3 = tk.Frame(add_frame, bg=bg)
         row3.pack(fill=tk.X, pady=(8, 0))
-        self._paste_btn = tk.Button(row3, text='从剪贴板粘贴', font=(self.FONT, 9),
-                                    bd=0, relief='flat', cursor='hand2',
-                                    bg=c['card'], fg=fg,
-                                    activebackground=c['card'], activeforeground=c['accent'],
-                                    command=self._paste_key)
+        self._paste_btn = self._make_button(row3, '从剪贴板粘贴', self._paste_key)
         self._paste_btn.pack(side=tk.LEFT)
-        self._add_btn = tk.Button(row3, text='添加并校验', font=(self.FONT, 9, 'bold'),
-                                  bd=0, relief='flat', cursor='hand2',
-                                  bg=c['accent'], fg=c['bg'],
-                                  activebackground=c['accent'], activeforeground=c['bg'],
-                                  padx=16, command=self._add_account)
+        self._add_btn = self._make_button(row3, '添加并校验', self._add_account,
+                                          style='accent', bold=True, padx=16)
         self._add_btn.pack(side=tk.RIGHT)
         hint = tk.Label(row3, text='添加时会用该密钥请求一次官方接口校验',
                         font=(self.FONT, 9), bg=bg, fg=sub)
@@ -166,26 +212,15 @@ class SettingsWindow:
                 row=row, column=0, sticky='w', pady=4)
             widget.grid(row=row, column=1, sticky='w', padx=(16, 0), pady=4)
 
-        self._interval_spin = tk.Spinbox(grid, from_=10, to=3600, increment=10,
-                                         font=(self.FONT, 10), width=8,
-                                         bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                         buttonbackground=c['card'], relief='flat')
-        self._interval_spin.delete(0, 'end')
-        self._interval_spin.insert(0, str(int(settings.get('refresh_interval', 60))))
+        self._interval_spin = self._make_spin(
+            grid, 10, 3600, int(settings.get('refresh_interval', 60)), step=10)
         add_option(0, '刷新间隔（秒）', self._interval_spin)
 
-        self._height_spin = tk.Spinbox(grid, from_=4, to=40, increment=1,
-                                       font=(self.FONT, 10), width=8,
-                                       bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                       buttonbackground=c['card'], relief='flat')
-        self._height_spin.delete(0, 'end')
-        self._height_spin.insert(0, str(int(settings.get('hotzone_height', 16))))
+        self._height_spin = self._make_spin(
+            grid, 4, 40, int(settings.get('hotzone_height', 16)))
         add_option(1, '热区高度（像素）', self._height_spin)
 
-        self._ratio_entry = tk.Entry(grid, font=(self.FONT, 10), width=8,
-                                     bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                     relief='flat', highlightthickness=1,
-                                     highlightbackground=c['border'], highlightcolor=c['accent'])
+        self._ratio_entry = self._make_entry(grid, width=8)
         self._ratio_entry.delete(0, 'end')
         self._ratio_entry.insert(0, str(float(settings.get('hotzone_width_ratio', 0.5))))
         add_option(2, '热区宽度占比（0.1–1.0）', self._ratio_entry)
@@ -203,28 +238,20 @@ class SettingsWindow:
         self._theme_combo.set(str(settings.get('theme', 'auto')))
         add_option(4, '主题', self._theme_combo)
 
-        self._offset_spin = tk.Spinbox(grid, from_=0, to=200, increment=1,
-                                       font=(self.FONT, 10), width=8,
-                                       bg=c['input_bg'], fg=fg, insertbackground=fg,
-                                       buttonbackground=c['card'], relief='flat')
-        self._offset_spin.delete(0, 'end')
-        self._offset_spin.insert(0, str(int(settings.get('hotzone_offset', 48))))
+        self._offset_spin = self._make_spin(
+            grid, 0, 200, int(settings.get('hotzone_offset', 48)))
         add_option(5, '热区偏移（像素）', self._offset_spin)
 
         # ---- 底部按钮 ----
         btn_frame = tk.Frame(main, bg=bg)
         btn_frame.pack(fill=tk.X, pady=(16, 0))
-        save_btn = tk.Button(btn_frame, text='保存选项', font=(self.FONT, 10, 'bold'),
-                             bd=0, relief='flat', cursor='hand2',
-                             bg=c['accent'], fg=c['bg'],
-                             activebackground=c['accent'], activeforeground=c['bg'],
-                             padx=24, pady=6, command=self._save)
+        save_btn = self._make_button(btn_frame, '保存选项', self._save,
+                                     style='accent', font_size=10, bold=True,
+                                     padx=24, pady=6)
         save_btn.pack(side=tk.RIGHT)
-        cancel_btn = tk.Button(btn_frame, text='关闭', font=(self.FONT, 10),
-                               bd=0, relief='flat', cursor='hand2',
-                               bg=c['card'], fg=fg,
-                               activebackground=c['card'], activeforeground=sub,
-                               padx=24, pady=6, command=self._cancel)
+        cancel_btn = self._make_button(btn_frame, '关闭', self._cancel,
+                                       font_size=10, padx=24, pady=6,
+                                       active_fg=sub)
         cancel_btn.pack(side=tk.RIGHT, padx=(0, 12))
 
     # ============ 账号列表 ============
@@ -290,17 +317,12 @@ class SettingsWindow:
             tk.Label(row, text=self._mask(key), font=(self.FONT, 9), bg=bg,
                      fg=sub).pack(side=tk.LEFT, padx=(8, 0))
 
-            rename_btn = tk.Button(row, text='改名', font=(self.FONT, 9),
-                                   bd=0, relief='flat', cursor='hand2',
-                                   bg=c['card'], fg=fg,
-                                   activebackground=c['card'], activeforeground=c['accent'],
-                                   padx=10, command=lambda k=key: self._rename_account(k))
+            rename_btn = self._make_button(
+                row, '改名', lambda k=key: self._rename_account(k), padx=10)
             rename_btn.pack(side=tk.RIGHT)
-            del_btn = tk.Button(row, text='删除', font=(self.FONT, 9),
-                                bd=0, relief='flat', cursor='hand2',
-                                bg=c['card'], fg=c['warn'],
-                                activebackground=c['card'], activeforeground=c['warn'],
-                                padx=10, command=lambda k=key: self._delete_account(k))
+            del_btn = self._make_button(
+                row, '删除', lambda k=key: self._delete_account(k),
+                style='danger', padx=10)
             del_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
     def _mask(self, key: str) -> str:
@@ -310,15 +332,17 @@ class SettingsWindow:
     # ============ 新增 / 改名 / 删除 ============
 
     def _paste_key(self) -> None:
+        text = ''
         try:
-            text = self.root.clipboard_get()
+            raw = self.root.clipboard_get().strip()
+            text = raw.splitlines()[0].strip() if raw else ''
         except Exception:
+            text = ''
+        if not text:
             messagebox.showwarning('提示', '剪贴板中没有可用的文本', parent=self.window)
             return
-        text = text.strip().splitlines()[0].strip() if text.strip() else ''
-        if text:
-            self._key_entry.delete(0, 'end')
-            self._key_entry.insert(0, text)
+        self._key_entry.delete(0, 'end')
+        self._key_entry.insert(0, text)
 
     def _next_default_label(self) -> str:
         accounts = getattr(self.config, 'accounts', []) or []
@@ -391,16 +415,14 @@ class SettingsWindow:
         except Exception as exc:
             self._inline_feedback(f'保存失败：{exc}', ok=False)
             return
-        if self.on_save:
-            self.on_save()
+        self._notify_saved()
         self._refresh_accounts()
         self._key_entry.delete(0, 'end')
         self._label_entry.delete(0, 'end')
         self._inline_feedback(f'已添加「{label}」并通过密钥校验')
 
     def _rename_account(self, key: str) -> None:
-        accounts = getattr(self.config, 'accounts', []) or []
-        account = next((a for a in accounts if getattr(a, 'key', '') == key), None)
+        account = self._find_account(key)
         if account is None:
             return
         old_label = getattr(account, 'label', '') or ''
@@ -418,11 +440,7 @@ class SettingsWindow:
         frame.pack(fill=tk.BOTH, expand=True)
         tk.Label(frame, text='新标签：', font=(self.FONT, 10),
                  bg=self.colors['bg'], fg=self.colors['fg']).pack(anchor='w')
-        entry = tk.Entry(frame, font=(self.FONT, 10),
-                         bg=self.colors['input_bg'], fg=self.colors['fg'],
-                         insertbackground=self.colors['fg'], relief='flat',
-                         highlightthickness=1, highlightbackground=self.colors['border'],
-                         highlightcolor=self.colors['accent'])
+        entry = self._make_entry(frame)
         entry.insert(0, old_label)
         entry.pack(fill=tk.X, pady=(8, 0))
         entry.focus_set()
@@ -446,20 +464,15 @@ class SettingsWindow:
 
         btn_frame = tk.Frame(frame, bg=self.colors['bg'])
         btn_frame.pack(fill=tk.X, pady=(12, 0))
-        tk.Button(btn_frame, text='确定', font=(self.FONT, 10),
-                  bd=0, relief='flat', cursor='hand2',
-                  bg=self.colors['accent'], fg=self.colors['bg'],
-                  padx=16, command=confirm).pack(side=tk.RIGHT)
-        tk.Button(btn_frame, text='取消', font=(self.FONT, 10),
-                  bd=0, relief='flat', cursor='hand2',
-                  bg=self.colors['card'], fg=self.colors['fg'],
-                  padx=16, command=dialog.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+        self._make_button(btn_frame, '确定', confirm, style='accent',
+                          font_size=10, padx=16).pack(side=tk.RIGHT)
+        self._make_button(btn_frame, '取消', dialog.destroy,
+                          font_size=10, padx=16).pack(side=tk.RIGHT, padx=(0, 8))
         dialog.bind('<Escape>', lambda e: dialog.destroy())
         dialog.bind('<Return>', lambda e: confirm())
 
     def _delete_account(self, key: str) -> None:
-        accounts = getattr(self.config, 'accounts', []) or []
-        account = next((a for a in accounts if getattr(a, 'key', '') == key), None)
+        account = self._find_account(key)
         if account is None:
             return
         label = getattr(account, 'label', '') or '未命名'
@@ -479,41 +492,39 @@ class SettingsWindow:
         except Exception as exc:
             self._inline_feedback(f'保存失败：{exc}', ok=False)
             return
-        if self.on_save:
-            self.on_save()
+        self._notify_saved()
         self._refresh_accounts()
         self._inline_feedback(f'已删除「{label}」')
 
     # ============ 保存 / 取消 ============
 
+    def _read_option(self, widget, conv, lo, hi, message: str):
+        """读取并校验单个选项；非法/越界时弹窗提示并返回 None。"""
+        try:
+            value = conv(widget.get())
+            if not lo <= value <= hi:
+                raise ValueError
+        except (TypeError, ValueError):
+            messagebox.showwarning('提示', message, parent=self.window)
+            return None
+        return value
+
     def _save(self) -> None:
-        try:
-            interval = int(self._interval_spin.get())
-            if not 10 <= interval <= 3600:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning('提示', '刷新间隔应为 10–3600 的整数', parent=self.window)
+        interval = self._read_option(self._interval_spin, int, 10, 3600,
+                                     '刷新间隔应为 10–3600 的整数')
+        if interval is None:
             return
-        try:
-            height = int(self._height_spin.get())
-            if not 4 <= height <= 40:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning('提示', '热区高度应为 4–40 的整数', parent=self.window)
+        height = self._read_option(self._height_spin, int, 4, 40,
+                                   '热区高度应为 4–40 的整数')
+        if height is None:
             return
-        try:
-            ratio = float(self._ratio_entry.get())
-            if not 0.1 <= ratio <= 1.0:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning('提示', '热区宽度占比应为 0.1–1.0 的数字', parent=self.window)
+        ratio = self._read_option(self._ratio_entry, float, 0.1, 1.0,
+                                  '热区宽度占比应为 0.1–1.0 的数字')
+        if ratio is None:
             return
-        try:
-            offset = int(self._offset_spin.get())
-            if not 0 <= offset <= 200:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning('提示', '热区偏移应为 0–200 的整数', parent=self.window)
+        offset = self._read_option(self._offset_spin, int, 0, 200,
+                                   '热区偏移应为 0–200 的整数')
+        if offset is None:
             return
 
         # R2-03/R2-01：统一经 apply_settings 落盘——失败时由 Config 恢复内存
@@ -530,8 +541,7 @@ class SettingsWindow:
         except Exception as exc:
             self._inline_feedback(f'选项保存失败：{exc}', ok=False)
             return
-        if self.on_save:
-            self.on_save()
+        self._notify_saved()
         self._cancel()
 
     def _cancel(self) -> None:

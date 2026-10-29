@@ -388,8 +388,7 @@ class WindowTracker:
         GetMonitorInfoW). Never raises; falls back to the window-only clamp
         when the monitor query fails.
         """
-        x = rect.center_x() - bar_w // 2
-        x = _clamp(x, rect.left, rect.right - bar_w)
+        x = _clamp(rect.center_x() - bar_w // 2, rect.left, rect.right - bar_w)
         if work_area is None:
             work_area = self._monitor_work_area(rect)
         if work_area is not None:
@@ -437,16 +436,24 @@ class WindowTracker:
         try:
             mr = wintypes.RECT(rect.left, rect.top, rect.right, rect.bottom)
             hm = _user32.MonitorFromRect(ctypes.byref(mr), _MONITOR_DEFAULTTONEAREST)
-            if not hm:
-                return None
-            mi = _MONITORINFO()
-            mi.cbSize = ctypes.sizeof(_MONITORINFO)
-            if not _user32.GetMonitorInfoW(hm, ctypes.byref(mi)):
-                return None
-            w = mi.rcWork
-            return Rect(w.left, w.top, w.right, w.bottom)
         except Exception:
             return None
+        return _work_area_of(hm)
+
+
+def _work_area_of(hm) -> Rect | None:
+    """Work area (excludes taskbar) of an HMONITOR; None on failure."""
+    try:
+        if not hm:
+            return None
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(hm, ctypes.byref(mi)):
+            return None
+        w = mi.rcWork
+        return Rect(w.left, w.top, w.right, w.bottom)
+    except Exception:
+        return None
 
 
 def get_work_area(x: int, y: int) -> Rect | None:
@@ -459,13 +466,6 @@ def get_work_area(x: int, y: int) -> Rect | None:
     try:
         p = wintypes.POINT(x, y)
         hm = _user32.MonitorFromPoint(ctypes.byref(p), _MONITOR_DEFAULTTONEAREST)
-        if not hm:
-            return None
-        mi = _MONITORINFO()
-        mi.cbSize = ctypes.sizeof(_MONITORINFO)
-        if not _user32.GetMonitorInfoW(hm, ctypes.byref(mi)):
-            return None
-        w = mi.rcWork
-        return Rect(w.left, w.top, w.right, w.bottom)
     except Exception:
         return None
+    return _work_area_of(hm)

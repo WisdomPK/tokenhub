@@ -15,6 +15,7 @@ import threading
 import tkinter as tk
 from typing import Callable, Optional
 
+from logger import log_exception
 from window_tracker import get_work_area  # 弹窗锚定：面板所在显示器工作区（多屏不跨屏）
 
 FONT = 'Microsoft YaHei UI'
@@ -84,18 +85,19 @@ class BaseDialog:
         self.window.configure(bg=colors['bg'])
         self.window.transient(parent)
         self.window.attributes('-topmost', True)
-        self._center_on(parent, width, height)
+        self._center_on(width, height)
         self.window.bind('<Escape>', lambda e: self._close(None))
         self.window.protocol('WM_DELETE_WINDOW', lambda: self._close(None))
 
     # ---- 定位 ----
 
-    def _center_on(self, parent, w: int, h: int) -> None:
+    def _center_on(self, w: int, h: int) -> None:
         """窗口小居中于父面板（以父窗口几何中心为基准，夹取在屏幕内）。
 
         仅用于 anchor=None 的旧路径；面板弹窗一律走 show(anchor=...)
         锚定定位（_place_near），避免多显示器下回退主屏居中导致跨屏。
         """
+        parent = self.parent
         try:
             px, py = parent.winfo_rootx(), parent.winfo_rooty()
             pw, ph = parent.winfo_width(), parent.winfo_height()
@@ -120,11 +122,7 @@ class BaseDialog:
             self.window.geometry(f'+{x}+{y}')
         except Exception as exc:
             # 锚定失败记录诊断，保持 _center_on 已放置的位置（不跨屏保证失效时兜底）
-            try:
-                from logger import log_exception
-                log_exception('弹窗锚定 _place_near', exc)
-            except Exception:
-                pass
+            log_exception('弹窗锚定 _place_near', exc)
 
     # ---- 模态 ----
 
@@ -164,25 +162,27 @@ class BaseDialog:
     def _make_button(self, parent, text, command, *,
                      accent=False, danger=False, padx=18, pady=5) -> tk.Button:
         c = self.c
-        if danger:
-            bg, fg = c['card'], c['warn']
-            active = (c['warn'], '#ffffff')
-        elif accent:
-            bg, fg = c['accent'], c['bg']
-            active = (c['accent'], c['bg'])
-        else:
-            bg, fg = c['card'], c['fg']
-            active = (c['card'], c['sub'])
+        bg, fg, active_bg, active_fg = self._button_colors(accent, danger)
         btn = tk.Button(parent, text=text, font=(FONT, 10),
                         bd=0, relief='flat', highlightthickness=0,
                         cursor='hand2', bg=bg, fg=fg,
-                        activebackground=active[0], activeforeground=active[1],
+                        activebackground=active_bg, activeforeground=active_fg,
                         padx=padx, pady=pady, command=command)
         if danger:
             # 删除按钮 hover 危险色（红）
             btn.bind('<Enter>', lambda e: btn.configure(bg=c['warn'], fg='#ffffff'))
             btn.bind('<Leave>', lambda e: btn.configure(bg=c['card'], fg=c['warn']))
         return btn
+
+    def _button_colors(self, accent: bool, danger: bool) -> tuple:
+        """按钮四色（bg / fg / activebackground / activeforeground：
+        danger=危险红、accent=主色、其余=卡片色）。"""
+        c = self.c
+        if danger:
+            return c['card'], c['warn'], c['warn'], '#ffffff'
+        if accent:
+            return c['accent'], c['bg'], c['accent'], c['bg']
+        return c['card'], c['fg'], c['card'], c['sub']
 
     def _make_entry(self, parent, show=None) -> tk.Entry:
         c = self.c
@@ -298,12 +298,12 @@ class AddAccountDialog(BaseDialog):
         self.error_label.configure(text=text, fg=self.c['warn'])
 
     def _paste(self) -> None:
+        text = ''
         try:
-            raw = self.parent.clipboard_get()
+            raw = self.parent.clipboard_get().strip()
+            text = raw.splitlines()[0].strip() if raw else ''
         except Exception:
-            self._set_error('剪贴板中没有可用的文本')
-            return
-        text = raw.strip().splitlines()[0].strip() if raw.strip() else ''
+            text = ''
         if not text:
             self._set_error('剪贴板中没有可用的文本')
             return

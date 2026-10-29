@@ -179,6 +179,36 @@ class TrayIcon:
 
     POLL_MS = 60  # 主线程命令轮询间隔
 
+    # WM_COMMAND 菜单 ID → 待派发命令名
+    _MENU_COMMANDS = {
+        MENU_SHOW: 'show',
+        MENU_HIDE: 'hide',
+        MENU_SETTINGS: 'settings',
+        MENU_HELP: 'help',
+        MENU_REFRESH: 'refresh',
+        MENU_EXIT: 'exit',
+    }
+    # 命令名 → 回调属性名（toggle 有主程序优先/回退两支，单独处理）
+    _HANDLERS = {
+        'show': 'on_show',
+        'hide': 'on_hide',
+        'settings': 'on_settings',
+        'help': 'on_help',
+        'refresh': 'on_refresh',
+        'exit': 'on_exit',
+    }
+    # 右键菜单项：(菜单 ID, 文案)；ID 为 None 表示分隔线
+    _MENU_ITEMS = (
+        (MENU_SHOW, '显示'),
+        (MENU_HIDE, '隐藏'),
+        (None, None),
+        (MENU_SETTINGS, '设置'),
+        (MENU_HELP, '帮助'),
+        (MENU_REFRESH, '立即刷新'),
+        (None, None),
+        (MENU_EXIT, '退出'),
+    )
+
     def __init__(self,
                  on_show: Callable, on_hide: Callable,
                  on_settings: Callable, on_help: Callable,
@@ -206,6 +236,7 @@ class TrayIcon:
         self._wndproc_cb = None  # TH-02: 持有 WNDPROC_ 包装，防 GC/类型错误
         self._command_queue: 'queue.Queue[object]' = queue.Queue()
         self._visible = True
+        self._poll_job = None
 
     # ---- 生命周期 ----
 
@@ -226,7 +257,7 @@ class TrayIcon:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         try:
-            if getattr(self, '_poll_job', None):
+            if self._poll_job is not None:
                 self.root.after_cancel(self._poll_job)
         except Exception:
             # §7.2：root 已销毁时 after_cancel 抛 TclError 属预期；仍留诊断
@@ -259,17 +290,7 @@ class TrayIcon:
 
     def _run_tray_loop(self) -> None:
         try:
-            wnd_class = WNDCLASSW()
-            # TH-02: 绑定方法不能直接赋给 WNDPROC_ 字段（类型错误）；
-            # 用 WNDPROC_ 包装并持有引用，保证回调生命周期。
-            self._wndproc_cb = WNDPROC_(self._wnd_proc)
-            wnd_class.lpfnWndProc = self._wndproc_cb
-            wnd_class.lpszClassName = 'TokenHubTrayV3'
-            wnd_class.hInstance = kernel32.GetModuleHandleW(None)
-            wnd_class.hIcon = user32.LoadIconW(0, IDI_APPLICATION)
-
-            if not user32.RegisterClassW(ctypes.byref(wnd_class)):
-                self._fail_init("RegisterClassW 失败（类可能已注册，继续尝试）")
+            wnd_class = self._register_window_class()
 
             self._hwnd = user32.CreateWindowExW(
                 0, 'TokenHubTrayV3', 'TokenHubTrayV3', 0,
@@ -308,21 +329,31 @@ class TrayIcon:
             elif mouse_msg == WM_LBUTTONUP:
                 self._command_queue.put('toggle')
         elif msg == WM_COMMAND:
-            mapping = {
-                self.MENU_SHOW: 'show',
-                self.MENU_HIDE: 'hide',
-                self.MENU_SETTINGS: 'settings',
-                self.MENU_HELP: 'help',
-                self.MENU_REFRESH: 'refresh',
-                self.MENU_EXIT: 'exit',
-            }
-            cmd = mapping.get(wParam)
+            cmd = self._MENU_COMMANDS.get(wParam)
             if cmd:
                 self._command_queue.put(cmd)
         elif msg == WM_DESTROY:
             self._running = False
             user32.PostQuitMessage(0)
         return user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+
+    @staticmethod
+    def _app_icon():
+        """应用默认图标（IDI_APPLICATION）。"""
+        return user32.LoadIconW(0, IDI_APPLICATION)
+
+    def _register_window_class(self) -> WNDCLASSW:
+        """注册并返回托盘窗口类（TH-02：持有 WNDPROC_ 包装，保证回调生命周期）。"""
+        wnd_class = WNDCLASSW()
+        # 绑定方法不能直接赋给 WNDPROC_ 字段（类型错误），需包装并持有引用
+        self._wndproc_cb = WNDPROC_(self._wnd_proc)
+        wnd_class.lpfnWndProc = self._wndproc_cb
+        wnd_class.lpszClassName = 'TokenHubTrayV3'
+        wnd_class.hInstance = kernel32.GetModuleHandleW(None)
+        wnd_class.hIcon = self._app_icon()
+        if not user32.RegisterClassW(ctypes.byref(wnd_class)):
+            self._fail_init("RegisterClassW 失败（类可能已注册，继续尝试）")
+        return wnd_class
 
     def _create_tray_icon(self) -> None:
         data = NOTIFYICONDATAW()
@@ -331,7 +362,7 @@ class TrayIcon:
         data.uID = 1
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         data.uCallbackMessage = WM_TRAY_CALLBACK
-        data.hIcon = user32.LoadIconW(0, IDI_APPLICATION)
+        data.hIcon = self._app_icon()
         data.szTip = 'TokenHub 额度条'
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
         self._icon_data = data
@@ -343,14 +374,11 @@ class TrayIcon:
 
     def _show_menu(self, hwnd) -> None:
         menu = user32.CreatePopupMenu()
-        user32.AppendMenuW(menu, 0, self.MENU_SHOW, '显示')
-        user32.AppendMenuW(menu, 0, self.MENU_HIDE, '隐藏')
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, 0, self.MENU_SETTINGS, '设置')
-        user32.AppendMenuW(menu, 0, self.MENU_HELP, '帮助')
-        user32.AppendMenuW(menu, 0, self.MENU_REFRESH, '立即刷新')
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, 0, self.MENU_EXIT, '退出')
+        for cmd, text in self._MENU_ITEMS:
+            if cmd is None:
+                user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            else:
+                user32.AppendMenuW(menu, 0, cmd, text)
 
         pt = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(pt))
@@ -395,11 +423,7 @@ class TrayIcon:
                 _log.exception("托盘 on_error 回调异常")
 
     def _dispatch(self, cmd: str) -> None:
-        if cmd == 'show':
-            self.on_show()
-        elif cmd == 'hide':
-            self.on_hide()
-        elif cmd == 'toggle':
+        if cmd == 'toggle':
             # R2-05：优先主程序状态回调（单一状态来源）；无则回退旧的内部字段判断
             if self.on_toggle is not None:
                 self.on_toggle()
@@ -407,11 +431,5 @@ class TrayIcon:
                 self.on_hide()
             else:
                 self.on_show()
-        elif cmd == 'settings':
-            self.on_settings()
-        elif cmd == 'help':
-            self.on_help()
-        elif cmd == 'refresh':
-            self.on_refresh()
-        elif cmd == 'exit':
-            self.on_exit()
+            return
+        getattr(self, self._HANDLERS[cmd])()

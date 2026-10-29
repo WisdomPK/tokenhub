@@ -25,6 +25,7 @@ import argparse
 import datetime
 import os
 import sys
+import time
 import tkinter as tk
 
 
@@ -47,7 +48,7 @@ class _Usage:
         self.rolling = rolling
         self.weekly = weekly
         self.monthly = monthly
-        self.fetched_at = __import__('time').time()
+        self.fetched_at = time.time()
 
 
 class _FakeValidator:

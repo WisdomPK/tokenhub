@@ -87,6 +87,13 @@ class HelpWindow:
         self.window.configure(bg=self.colors['bg'])
         self._center()
 
+        self._build_widgets()
+
+        self.window.bind('<Escape>', lambda e: self._close())
+        self.window.protocol('WM_DELETE_WINDOW', self._close)
+
+    def _build_widgets(self) -> None:
+        """正文区（可滚动说明文本）+ 底部关闭按钮。"""
         main = tk.Frame(self.window, bg=self.colors['bg'], padx=12, pady=12)
         main.pack(fill=tk.BOTH, expand=True)
 
@@ -128,8 +135,6 @@ class HelpWindow:
                   activeforeground=self.colors['accent'],
                   padx=20, pady=4, command=self._close).pack(side=tk.RIGHT)
 
-        self.window.bind('<Escape>', lambda e: self._close())
-        self.window.protocol('WM_DELETE_WINDOW', self._close)
 
     def _center(self) -> None:
         sw = self.window.winfo_screenwidth()
