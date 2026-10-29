@@ -11,7 +11,9 @@ R3-05 异常分类（冻结）：
 - 超时（直接 TimeoutError / URLError 包装超时）与请求已发出后的响应读取中断
   （连接重置/中止/RemoteDisconnected 等，服务端可能已执行）→ timeout_uncertain；
 - 连接建立前的拒绝（ConnectionRefused 等）→ unreachable；
-- 401 → denied。
+- 401 → denied；
+- HTTP 200 但响应含 uncertain:true 或 status=timeout_uncertain → timeout_uncertain
+  （插件已确认无法写入/无法确认，保留其错误消息；不得降级为 denied）。
 不得把不确定场景归为 unreachable（不自动重试、不虚假声称失败）。
 
 U09 成功消息（冻结，仅用于对接 main 的 toast 组合）：
@@ -102,6 +104,12 @@ class ControlClient:
                         how = "已完成"
                     return (True, how, "ok")
                 error = data.get("error") if isinstance(data, dict) else None
+                if isinstance(data, dict) and (
+                        data.get("uncertain") is True
+                        or data.get("status") == "timeout_uncertain"):
+                    # 插件已确认“超时且无法确认”：保留待确认语义，不能降级为 denied
+                    return (False, error or "控制接口超时，切换结果待确认",
+                            "timeout_uncertain")
                 return (False, error or "控制接口拒绝", "denied")
         except HTTPError as e:
             if e.code == 401:

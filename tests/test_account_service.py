@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """W7（F8）：桌面切换服务与“已配置/待重启”语义。"""
 
+import json
+import os
 import queue
 import sys
 import threading
@@ -14,11 +16,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from account_service import AccountService, SwitchResult  # noqa: E402
 from api import AccountUsage, UsageMetric  # noqa: E402
+from control_client import ControlClient  # noqa: E402
 from floating_window import FloatingWindow  # noqa: E402
 from main import TokenHubApp  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
 
 TIMEOUT_MSG = "控制接口超时，切换结果待确认"
+
+
+class FakeResp:
+    def __init__(self, payload):
+        self.status = 200
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _uncertain_urlopen(request, timeout=None):
+    if request.full_url.endswith("/health"):
+        return FakeResp({"ok": True})
+    return FakeResp({
+        "ok": False,
+        "method": "api",
+        "uncertain": True,
+        "status": "timeout_uncertain",
+        "error": "控制接口超时，无法确认切换结果；未再次写入认证文件",
+    })
 
 
 class FakeCtrl:
@@ -58,6 +88,9 @@ class FakeStore:
         self.switch_calls.append(key)
         self.current = key
         return self.switch_result
+
+    def mtime(self):
+        return 0.0
 
 
 class AccountServiceTests(unittest.TestCase):
@@ -216,6 +249,33 @@ class IdentityStateTests(unittest.TestCase):
         self.assertEqual(kind, "error")
         self.assertIn("已核对：当前账号仍为「主账号」", text)
         self.assertTrue(kwargs.get("sticky"))
+        self.assertEqual(app._sticky_reason, "switch")
+
+    def test_http_200_uncertain_reaches_service_and_ui(self):
+        """插件 200+uncertain → ControlClient → AccountService → UI 待确认。"""
+        store = FakeStore(current="key-a")
+        with mock.patch.dict(os.environ, {
+                "TOKENHUB_CONTROL_PORT": "8123",
+                "TOKENHUB_CONTROL_TOKEN": "tok123"}, clear=False), \
+                mock.patch("control_client.urlopen",
+                           side_effect=_uncertain_urlopen):
+            result = AccountService(store, ControlClient()).switch("key-b")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.outcome, "timeout_uncertain")
+        self.assertEqual(result.method, "api")
+        self.assertIn("无法确认切换结果", result.message)
+
+        app = _app()
+        app.store = store
+        app._current_key = "key-a"
+        app._switching_inflight = True
+        app._switch_gen = 1
+        app._handle_switch_result(1, "key-b", "备用", result)
+        args, kwargs = app.win.set_toast.call_args
+        text, kind = args
+        self.assertEqual(kind, "error")
+        self.assertTrue(kwargs.get("sticky"))
+        self.assertIn("无法确认", text)
         self.assertEqual(app._sticky_reason, "switch")
 
     def test_restore_failed_residue_keeps_sticky_error(self):

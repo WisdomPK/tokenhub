@@ -32,7 +32,8 @@ from control_client import ControlClient, ControlInfo  # noqa: E402
 # ---------------------------------------------------------------------------
 # 本地 stub 控制服务器（control_client 测试用）
 # ---------------------------------------------------------------------------
-STUB = {"token": "tok123", "switch_delay": 0.0, "switch_http": 200, "switch_ok": True}
+STUB = {"token": "tok123", "switch_delay": 0.0, "switch_http": 200,
+        "switch_ok": True, "switch_uncertain": False}
 
 
 class _StubHandler(BaseHTTPRequestHandler):
@@ -81,6 +82,15 @@ class _StubHandler(BaseHTTPRequestHandler):
         key = body.get("key") if isinstance(body, dict) else None
         if not isinstance(key, str) or not (key.startswith("sk-") or key.startswith("oc_sk_")):
             self._send(400, {"ok": False, "error": "bad key"})
+            return
+        if STUB["switch_uncertain"]:
+            self._send(200, {
+                "ok": False,
+                "method": "api",
+                "uncertain": True,
+                "status": "timeout_uncertain",
+                "error": "控制接口超时，无法确认切换结果；未再次写入认证文件",
+            })
             return
         self._send(STUB["switch_http"], {
             "ok": STUB["switch_ok"],
@@ -487,6 +497,41 @@ class AuthStoreTests(unittest.TestCase):
             store = AuthStore()
             self.assertEqual(store.path(), str(env_p))
             self.assertEqual(store.current_key(), "sk-env-key-0002")
+
+    def test_auth_env_path_missing_is_only_target(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        env_p = Path(self.tmp.name) / "env-missing" / "auth.json"
+        with self._env() as e:
+            e["OPENCODE_AUTH_PATH"] = str(env_p)
+            store = AuthStore()
+            self.assertEqual(store.path(), str(env_p))
+            self.assertIsNone(store.current_key())
+            ok, msg, status = store.switch_to("sk-env-new-9999")
+            self.assertTrue(ok, msg)
+            self.assertEqual(status, "ok")
+            self.assertTrue(env_p.exists())
+            self.assertEqual(default.read_bytes(), default_bytes)
+            self.assertEqual(store.current_key(), "sk-env-new-9999")
+
+    def test_auth_env_path_corrupt_does_not_touch_default(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        env_p = Path(self.tmp.name) / "env-broken.json"
+        env_p.write_text("{not-json", encoding="utf-8")
+        env_bytes = env_p.read_bytes()
+        with self._env() as e:
+            e["OPENCODE_AUTH_PATH"] = str(env_p)
+            store = AuthStore()
+            self.assertEqual(store.path(), str(env_p))
+            ok, msg, status = store.switch_to("sk-env-new-9999")
+            self.assertFalse(ok)
+            self.assertEqual(status, "unaffected")
+            self.assertIn("解析失败", msg)
+            self.assertEqual(env_p.read_bytes(), env_bytes)
+            self.assertEqual(default.read_bytes(), default_bytes)
 
     def test_auth_path_xdg(self):
         xdg = Path(self.tmp.name) / "xdg"
@@ -910,6 +955,7 @@ class ControlClientTests(unittest.TestCase):
         STUB["switch_delay"] = 0.0
         STUB["switch_http"] = 200
         STUB["switch_ok"] = True
+        STUB["switch_uncertain"] = False
 
     def test_control_discover_from_env(self):
         with mock.patch.dict(os.environ, {
@@ -969,6 +1015,17 @@ class ControlClientTests(unittest.TestCase):
         ok, msg, status = client.switch(ControlInfo(port, "tok123"), "sk-test-key-abcdef")
         self.assertFalse(ok)
         self.assertEqual(status, "denied")
+
+    def test_control_switch_200_uncertain_keeps_timeout_status(self):
+        """插件 200 + ok:false + uncertain/status 必须保持 timeout_uncertain。"""
+        STUB["switch_uncertain"] = True
+        server, port = _start_stub()
+        self.addCleanup(_stop_stub, server)
+        client = ControlClient()
+        ok, msg, status = client.switch(ControlInfo(port, "tok123"), "sk-test-key-abcdef")
+        self.assertFalse(ok)
+        self.assertEqual(status, "timeout_uncertain")
+        self.assertIn("无法确认切换结果", msg)
 
     def test_control_switch_accepts_oc_sk_key(self):
         # stub 校验器接受 oc_sk_ 前缀（与插件 /switch 一致）
