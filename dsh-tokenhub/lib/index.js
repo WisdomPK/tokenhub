@@ -222,10 +222,16 @@ function createHub(ctx, options) {
   /** Stop polling and prevent a late batch from committing after unload. */
   const dispose = () => snapshotService.dispose()
 
-  /** A mutation that succeeded invalidates the cache after the queue settles. */
+  /**
+   * Invalidate the cache after the queue settles whenever the credential state
+   * may have moved: a clean success, a partial result, an explicit changed flag,
+   * or an outcome whose write could not be confirmed.
+   */
   const mutation = (operation) => async (...args) => {
     const result = await accounts[operation](...args)
-    if (result.ok) snapshotService.invalidate()
+    if (result.ok || result.changed === true || result.partial === true || result.outcome === 'timeout_uncertain') {
+      snapshotService.invalidate()
+    }
     return result
   }
 
@@ -284,7 +290,13 @@ function apply(ctx, config = {}) {
       } catch {
         /* a malformed URL is simply not a forced refresh */
       }
-      sendJson(res, 200, await hub.snapshot(force))
+      const payload = await hub.snapshot(force)
+      // An internal failure is not an empty account list. Answer with an
+      // explicit failure status so the client renders the error, not "no keys".
+      if (typeof payload.error === 'string' && payload.error.startsWith('internal:')) {
+        return sendJson(res, 500, Object.assign({ ok: false }, payload))
+      }
+      sendJson(res, 200, payload)
     } catch (error) {
       sendInternal(res, error)
     }

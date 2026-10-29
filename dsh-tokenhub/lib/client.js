@@ -69,6 +69,7 @@ window.__ModuleLoader__.load({
       ok: '确定',
       offline: '离岔',
       noData: '数据不可用',
+      lastData: '上次',
       reset: '即将重置',
       addTitle: '新增账号',
       addName: '账号名（可留空，自动命名）',
@@ -119,6 +120,7 @@ window.__ModuleLoader__.load({
       ok: 'OK',
       offline: 'offline',
       noData: 'no data',
+      lastData: 'last',
       reset: 'resetting',
       addTitle: 'Add account',
       addName: 'Account name (blank generates one)',
@@ -311,8 +313,18 @@ window.__ModuleLoader__.load({
         const win = windowOf(source, key)
         const value = pct(win)
         if (value === null) return { band: 'na', width: 100 }
+        // A stale reading is shown at its old width but never in the fresh
+        // green band; the row text says when it was last read and why.
+        if (win.stale === true) return { band: 'na', width: clampPct(value) }
         return { band: level(value, win.status, thresholds), width: clampPct(value) }
       })
+    }
+
+    /** Why a stale window is old, in the same short form the row shows. */
+    function reasonOf(code) {
+      if (!code) return ''
+      if (code === 'no-data') return t.noData
+      return String(code)
     }
 
     /**
@@ -437,9 +449,11 @@ window.__ModuleLoader__.load({
         post(ACCOUNT, payload()).then((res) => {
           setBusy(false)
           if (res && res.ok) {
-            props.onAdded(res.message || t.ok)
+            // The parent owns the toast: a warning must outlive this dialog.
+            props.onAdded(res)
             return
           }
+          if (res && Array.isArray(res.warnings) && res.warnings.length > 0) props.onWarnings(res.warnings)
           setNote({ kind: 'err', text: (res && res.error) || t.hostError })
         })
       }
@@ -508,7 +522,13 @@ window.__ModuleLoader__.load({
     function MetricRow(props) {
       const win = windowOf(props.entry, props.window)
       const value = pct(win)
-      const band = level(value, win ? win.status : null, props.thresholds)
+      const stale = Boolean(win && win.stale === true)
+      const band = stale ? 'na' : level(value, win ? win.status : null, props.thresholds)
+      const tail = stale
+        ? t.lastData + ' ' + fmtClock(win.lastSuccessAt) + (win.error ? ' · ' + reasonOf(win.error) : '')
+        : win && win.resetsAt
+          ? '⟳ ' + fmtRemain(win.resetsAt)
+          : ''
       return h(
         'div',
         { className: 'th-row' },
@@ -519,7 +539,7 @@ window.__ModuleLoader__.load({
           h('i', { className: 'th-fill ' + band, style: { width: clampPct(value) + '%' } }),
         ),
         h('span', { className: 'th-pct ' + band }, value === null ? t.noData : Math.round(value) + '%'),
-        h('span', { className: 'th-reset' }, win && win.resetsAt ? '⟳ ' + fmtRemain(win.resetsAt) : ''),
+        h('span', { className: 'th-reset' }, tail),
       )
     }
 
@@ -586,8 +606,9 @@ window.__ModuleLoader__.load({
     function Panel(props) {
       const { data, failed, entries, thresholds, busy, toast, addButton } = props
       let body
-      if (failed) body = h('div', { className: 'th-empty' }, t.loadFailed)
-      else if (!data) body = h('div', { className: 'th-empty' }, t.loading)
+      if (failed) {
+        body = h('div', { className: 'th-empty' }, t.loadFailed + ' · ' + (typeof failed === 'string' ? failed : t.noData))
+      } else if (!data) body = h('div', { className: 'th-empty' }, t.loading)
       else if (entries.length === 0) {
         body = h(
           'div',
@@ -672,15 +693,28 @@ window.__ModuleLoader__.load({
         const seq = loadSeq.current + 1
         loadSeq.current = seq
         fetch(SNAPSHOT + (force ? '?force=1' : ''), { headers: { Accept: 'application/json' } })
-          .then((res) => (res.ok ? res.json() : Promise.reject(new Error('HTTP ' + res.status))))
+          .then(async (res) => {
+            let payload = null
+            try {
+              payload = await res.json()
+            } catch {
+              payload = null
+            }
+            if (!res.ok) {
+              const message = payload && payload.error ? payload.error : 'HTTP ' + res.status
+              throw new Error(message)
+            }
+            return payload
+          })
           .then((payload) => {
             if (!mounted.current || seq !== loadSeq.current) return
             setData(payload)
             setFailed(false)
           })
-          .catch(() => {
+          .catch((error) => {
             if (!mounted.current || seq !== loadSeq.current) return
-            setFailed(true)
+            const message = String((error && error.message) || error)
+            setFailed(message || t.loadFailed)
           })
       }, [])
 
@@ -740,7 +774,8 @@ window.__ModuleLoader__.load({
             else say(kindOf ? kindOf(res) : 'ok', res.message || t.ok)
           } else {
             const text = [res && res.error, warnings].filter(Boolean).join('；')
-            say('err', text || t.hostError)
+            if (warnings) say('warn', text, true)
+            else say('err', text || t.hostError)
           }
           load(true)
         })
@@ -768,10 +803,16 @@ window.__ModuleLoader__.load({
       )
 
       const closeDialog = () => setDialog(null)
-      const dialogDone = (message) => {
+      const dialogDone = (res) => {
         setDialog(null)
-        say('ok', message)
+        const warnings = warningsOf(res)
+        if (warnings) say('warn', warnings, true)
+        else say('ok', (res && res.message) || t.ok)
         load(true)
+      }
+      const dialogWarnings = (warnings) => {
+        const text = warnings.map((warning) => warning && warning.message).filter(Boolean).join('；')
+        say('warn', text || t.hostError, true)
       }
 
       let modal = null
@@ -797,6 +838,7 @@ window.__ModuleLoader__.load({
           initialName: dialog.current,
           onCancel: closeDialog,
           onAdded: dialogDone,
+          onWarnings: dialogWarnings,
         })
       }
 

@@ -533,6 +533,75 @@ lc = lockingCtx(() => new Error('EACCES: permission denied, open the credentials
 lr = (await addGo7(lc.ctx)).body
 check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EACCES/.test(lr.error || ''), lr.error)
 
+// ---- duplicate explicit key names produce one row per name ----
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_B)
+  st.refs.set('OPENCODE_GO_KEY_go1', KEY_A)
+  st.refs.set('OPENCODE_GO_KEY_go2', KEY_B)
+  const c = makeCtx(st)
+  apply(c, {
+    credentialsPath: credPath,
+    opencodeAuthPath: authPath,
+    syncOpencodeAuth: false,
+    keyNames: ['go1', 'go1', 'go2', 'go2'],
+  })
+  await settle()
+  const dupSnap = (await request(c, SNAP, { force: true })).body
+  check(
+    'duplicate explicit names are collapsed into one row each',
+    dupSnap.entries.length === 2 && new Set(dupSnap.entries.map((entry) => entry.id)).size === 2,
+    JSON.stringify(dupSnap.entries.map((entry) => [entry.id, entry.name])),
+  )
+  check(
+    'duplicate explicit names never produce two active rows',
+    dupSnap.entries.filter((entry) => entry.active).length === 1,
+    String(dupSnap.entries.filter((entry) => entry.active).length),
+  )
+}
+
+// ---- a failed window keeps its last reading and is marked stale on the wire ----
+{
+  const liveFetch = globalThis.fetch
+  let mode = 'ok'
+  globalThis.fetch = async () => {
+    if (mode === 'fail') return { status: 500, ok: false, async json() { return {} } }
+    return {
+      status: 200,
+      ok: true,
+      async json() {
+        return { usage: {
+          rolling: { status: 'ok', percent: 10, resetsAt: '2027-01-01T00:00:00Z' },
+          weekly: { status: 'ok', percent: 20, resetsAt: '2027-01-02T00:00:00Z' },
+          monthly: { status: 'ok', percent: 30, resetsAt: '2027-01-03T00:00:00Z' },
+        } }
+      },
+    }
+  }
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: [] })
+  await settle()
+  const fresh = (await request(c, SNAP, { force: true })).body
+  check('a fresh host window starts non-stale', fresh.entries[0].windows.rolling.stale === false && typeof fresh.entries[0].windows.rolling.lastSuccessAt === 'number')
+  mode = 'fail'
+  const stale = (await request(c, SNAP, { force: true })).body
+  check(
+    'a failed host window keeps the previous percentage and marks it stale',
+    stale.entries[0].windows.rolling.percent === 10 &&
+      stale.entries[0].windows.rolling.stale === true &&
+      stale.entries[0].windows.rolling.error === 'http-500',
+    JSON.stringify(stale.entries[0].windows.rolling),
+  )
+  check(
+    'the stale host window still names the last success time',
+    stale.entries[0].windows.rolling.lastSuccessAt === fresh.entries[0].windows.rolling.lastSuccessAt,
+    JSON.stringify([fresh.entries[0].windows.rolling.lastSuccessAt, stale.entries[0].windows.rolling.lastSuccessAt]),
+  )
+  globalThis.fetch = liveFetch
+}
+
 // ---- storage failures are not an empty pool ----
 {
   const st = makeStore()
@@ -549,11 +618,12 @@ check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EAC
   console.error = (...args) => logs.push(args.map(String).join(' '))
   apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['go1'] })
   await settle()
-  const failedSnap = (await request(c, SNAP, { force: true })).body
+  const failedSnapResponse = await request(c, SNAP, { force: true })
+  const failedSnap = failedSnapResponse.body
   check(
     'a storage read failure is an internal snapshot error, not no-keys',
-    /^internal:/.test(failedSnap.error || '') && failedSnap.error !== 'no-keys',
-    String(failedSnap.error),
+    failedSnapResponse.status === 500 && /^internal:/.test(failedSnap.error || '') && failedSnap.error !== 'no-keys',
+    failedSnapResponse.status + ' ' + String(failedSnap.error),
   )
   check('the snapshot failure is logged', logs.some((line) => /snapshot refresh failed/.test(line)), logs.join(' | ').slice(0, 180))
   const failedSwitch = await Promise.race([
@@ -718,6 +788,36 @@ try {
   check('a failed backup is reported, not hidden', backupFailSwitch.ok === true && backupFailSwitch.warnings.some((w) => w.code === 'opencode-auth'), JSON.stringify(backupFailSwitch.warnings))
   check('a failed backup leaves the auth file untouched', readFileSync(explicitPath).equals(originalDoc))
   rmSync(backupDir, { recursive: true, force: true })
+
+  // a temporary-file cleanup failure is logged, not silently swallowed
+  {
+    const cleanupPath = join(dir, 'cleanup-auth.json')
+    writeAuth(cleanupPath, KEY_B, { other: { keep: 'cleanup' } })
+    const cleanupBefore = readFileSync(cleanupPath)
+    const cleanupWhen = new RealDate('2032-06-07T08:09:10.011Z')
+    globalThis.Date = class extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(cleanupWhen.getTime())
+        else super(...args)
+      }
+      static now() { return cleanupWhen.getTime() }
+    }
+    const tmpPath = cleanupPath + '.tokenhub.tmp-' + process.pid + '-' + cleanupWhen.getTime()
+    mkdirSync(tmpPath, { recursive: true })
+    const cleanupLogs = []
+    const originalWarn = console.warn
+    console.warn = (...args) => cleanupLogs.push(args.map(String).join(' '))
+    const cleanupStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+    const cleanupCtx = authCase(cleanupStore, cleanupPath)
+    await settle()
+    const cleanupSwitch = (await request(cleanupCtx, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+    console.warn = originalWarn
+    globalThis.Date = RealDate
+    check('a temp cleanup failure is reported as an auth warning', cleanupSwitch.ok === true && cleanupSwitch.warnings.some((w) => w.code === 'opencode-auth'), JSON.stringify(cleanupSwitch.warnings))
+    check('a temp cleanup failure names the file it could not remove', cleanupLogs.some((line) => line.includes(tmpPath)), cleanupLogs.join(' | ').slice(0, 220))
+    check('a temp cleanup failure does not claim the auth file was written', readFileSync(cleanupPath).equals(cleanupBefore))
+    rmSync(tmpPath, { recursive: true, force: true })
+  }
 
   // a failed replacement leaves the original intact
   authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })

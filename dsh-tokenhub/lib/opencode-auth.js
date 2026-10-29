@@ -30,6 +30,11 @@ function readJsonFile(target) {
   return JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw)
 }
 
+/** Cleanup is best effort, but a failed cleanup is worth knowing about. */
+function warnCleanup(target, error) {
+  console.warn('[dsh-tokenhub] failed to remove temporary auth file ' + target + ':', error)
+}
+
 /**
  * Resolve the opencode auth document: an explicit override, then an explicit
  * environment path, then automatic discovery.
@@ -118,8 +123,8 @@ export function restoreAuth(target, backupPath, existed) {
     } catch {
       try {
         rmSync(tmp, { force: true })
-      } catch {
-        /* best effort */
+      } catch (cleanupError) {
+        warnCleanup(tmp, cleanupError)
       }
       return failed()
     }
@@ -189,8 +194,8 @@ export function syncOpencodeAuth(key, override) {
   } catch {
     try {
       rmSync(tmp, { force: true })
-    } catch {
-      /* best effort */
+    } catch (cleanupError) {
+      warnCleanup(tmp, cleanupError)
     }
     return { ok: false, message: 'auth.json 写入失败，原文件未受影响' }
   }

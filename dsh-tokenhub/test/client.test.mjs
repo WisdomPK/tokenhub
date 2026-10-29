@@ -81,7 +81,10 @@ let SNAPSHOT = {
 const calls = []
 let switchAuthFailed = false
 let switchWarnings = null
+let switchFailure = null
 let holdSwitch = null
+let accountWarnings = null
+let accountFailure = false
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const reply = (payload) => ({ ok: true, status: 200, async json() { return payload } })
@@ -94,17 +97,27 @@ globalThis.fetch = async (url, init) => {
       holdSwitch = null
       await gate
     }
-    const warnings = switchWarnings || []
+    if (switchFailure) {
+      return reply({ ok: false, error: switchFailure.error, warnings: switchFailure.warnings || [] })
+    }
+    const warnings = (switchAuthFailed
+      ? [{ code: 'opencode-auth', message: 'opencode \u540c\u6b65\u5931\u8d25\uff1a\u6743\u9650\u4e0d\u8db3' }]
+      : []).concat(switchWarnings || [])
     return reply({
       ok: true,
       name: body.name,
       message:
         '\u5df2\u5207\u6362\u5230\u300c' + body.name + '\u300d\uff0c\u4e0b\u4e00\u4e2a\u8bf7\u6c42\u5373\u751f\u6548' +
-        (switchAuthFailed ? '\uff1bopencode \u540c\u6b65\u5931\u8d25\uff1a\u6743\u9650\u4e0d\u8db3' : '') +
         warnings.map((w) => '\uff1b' + w.message).join(''),
       warnings,
       opencodeAuth: { enabled: true, ok: !switchAuthFailed, message: switchAuthFailed ? '\u6743\u9650\u4e0d\u8db3' : '\u5df2\u540c\u6b65' },
     })
+  }
+  if (target === '/plugins/dsh-tokenhub/account') {
+    if (accountFailure) {
+      return reply({ ok: false, error: '\u90e8\u5206\u5b8c\u6210\uff1a\u65e7\u540d\u672a\u5220\u9664', warnings: accountWarnings || [] })
+    }
+    return reply({ ok: true, name: body.name, message: '\u5df2\u5904\u7406\u300c' + body.name + '\u300d', warnings: accountWarnings || [] })
   }
   return reply({ ok: true, name: body.name, message: '\u5df2\u5904\u7406\u300c' + body.name + '\u300d' })
 }
@@ -232,6 +245,18 @@ try {
   check('closing the warning clears it', q(host, '.th-toast') === null)
   switchWarnings = null
 
+  // A failed mutation that carries warnings is still a warning to keep visible.
+  switchFailure = {
+    error: '\u8bfb\u56de\u6821\u9a8c\u5931\u8d25\uff0c\u72b6\u6001\u5f85\u786e\u8ba4',
+    warnings: [{ code: 'rollback', message: '\u56de\u6eda\u672a\u786e\u8ba4\uff0c\u72b6\u6001\u5f85\u786e\u8ba4' }],
+  }
+  await click(byText(host, 'button', '\u5207\u6362'))
+  await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))
+  check('a failed mutation with warnings uses the sticky warning toast', q(host, '.th-toast.warn') !== null, q(host, '.th-toast') && q(host, '.th-toast').className)
+  check('the failure warning states the reason', /回滚未确认/.test(txt(host)), txt(host).slice(-90))
+  await click(q(host, '.th-toast-close'))
+  switchFailure = null
+
   // While one mutation is in flight every conflicting action is disabled.
   let releaseSwitch
   holdSwitch = new Promise((r) => { releaseSwitch = r })
@@ -256,7 +281,7 @@ try {
   switchAuthFailed = true
   await click(byText(host, 'button', '\u5207\u6362'))
   await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))
-  check('a failed opencode sync is styled as a problem', q(host, '.th-toast.err') !== null, q(host, '.th-toast') && q(host, '.th-toast').className)
+  check('a failed opencode sync is a persistent warning', q(host, '.th-toast.warn') !== null, q(host, '.th-toast') && q(host, '.th-toast').className)
   check(
     'and the failure is stated once, not twice',
     (txt(host).match(/\u540c\u6b65\u5931\u8d25/g) || []).length === 1,
@@ -334,6 +359,21 @@ try {
   })
   await click(byText(host3, '.th-modal button', '\u52a0\u5165'))
   check('join posted op=joinPool with the name', calls.length === 1 && calls[0].body.op === 'joinPool' && calls[0].body.name === 'Main', JSON.stringify(calls[0] || null))
+
+  accountWarnings = [{ code: 'active-marker', message: '\u300c\u4f7f\u7528\u4e2d\u300d\u6807\u8bb0\u5199\u5165\u5931\u8d25' }]
+  await click(byText(host3, 'button', '\u52a0\u5165\u6c60'))
+  await act(async () => {
+    const input = all(host3, '.th-input')[0]
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, 'Warned')
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 10))
+  })
+  await click(byText(host3, '.th-modal button', '\u52a0\u5165'))
+  check('a successful join with warnings closes the dialog', q(host3, '.th-modal') === null)
+  check('a join warning reaches the parent as a sticky warning', q(host3, '.th-toast.warn') !== null && /标记写入失败/.test(txt(host3)), q(host3, '.th-toast') && q(host3, '.th-toast').className)
+  await click(q(host3, '.th-toast-close'))
+  accountWarnings = null
 
   // ================= the add dialog =================
   SNAPSHOT = {
@@ -440,6 +480,28 @@ try {
     JSON.stringify(calls[0] || null),
   )
 
+  accountFailure = true
+  accountWarnings = [{ code: 'partial-rename', message: '\u65b0\u540d\u5df2\u5199\u5165\uff0c\u4f46\u65e7\u540d\u672a\u80fd\u5220\u9664' }]
+  await click(byText(host6, 'button', '\u6539\u540d'))
+  await act(async () => {
+    const input = all(host6, '.th-input')[0]
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set
+    setter.call(input, 'Loaded')
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+    await new Promise((r) => setTimeout(r, 10))
+  })
+  await click(byText(host6, '.th-modal button', '\u4fdd\u5b58'))
+  check('a failed rename keeps the dialog open for correction', q(host6, '.th-modal') !== null)
+  check('the rename error stays in the dialog', /部分完成/.test(txt(host6)), txt(host6).slice(-120))
+  check(
+    'the rename warning reaches the parent as a sticky warning',
+    q(host6, '.th-toast.warn') !== null && /旧名未能删除/.test(txt(host6)),
+    q(host6, '.th-toast') && q(host6, '.th-toast').className,
+  )
+  await click(q(host6, '.th-modal button', '\u53d6\u6d88'))
+  accountFailure = false
+  accountWarnings = null
+
   // ================= a rolling window with no number =================
   SNAPSHOT = {
     updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
@@ -527,6 +589,52 @@ try {
       txt(host11).indexOf('newer') !== -1 && txt(host11).indexOf('older') === -1,
       txt(host11).slice(0, 120),
     )
+    globalThis.fetch = liveFetch
+  }
+
+  // ================= stale windows are not fresh green readings =================
+  {
+    SNAPSHOT = {
+      updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
+      entries: [poolRow('stale', true, {
+        rolling: { status: 'ok', percent: 55, resetsAt: null, stale: true, error: 'network', lastSuccessAt: NOW - 60000, lastAttemptAt: NOW },
+        weekly: win(10, 1),
+        monthly: win(20, 1),
+      })],
+    }
+    const hostStale = await mount()
+    await click(q(hostStale, '.th-gauge'))
+    check(
+      'a stale window uses the neutral band, not the fresh green one',
+      all(hostStale, '.th-gauge-fill')[0].className.indexOf('na') !== -1 &&
+        all(hostStale, '.th-gauge-fill')[0].style.width === '55%' &&
+        all(hostStale, '.th-pct')[0].className.indexOf('na') !== -1,
+      all(hostStale, '.th-gauge-fill')[0].className + ' / ' + all(hostStale, '.th-pct')[0].className,
+    )
+    check(
+      'a stale window says when the last reading was and why it is old',
+      /上次/.test(txt(hostStale)) && /network/.test(txt(hostStale)),
+      txt(hostStale).slice(0, 180),
+    )
+    check('fresh windows on the same card still read normally', all(hostStale, '.th-gauge-fill')[1].className.indexOf('ok') !== -1)
+  }
+
+  // ================= an internal snapshot failure is shown, not "no entries" =================
+  {
+    const liveFetch = globalThis.fetch
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      async json() { return { ok: false, error: 'internal: disk gone' } },
+    })
+    const hostInternal = await mount()
+    await click(q(hostInternal, '.th-gauge'))
+    check(
+      'a 500 snapshot renders the internal error text',
+      /internal: disk gone/.test(txt(hostInternal)),
+      txt(hostInternal).slice(0, 160),
+    )
+    check('the internal failure does not claim the account list is empty', !/未发现账号|未配置 opencode-go/.test(txt(hostInternal)), txt(hostInternal).slice(0, 160))
     globalThis.fetch = liveFetch
   }
 

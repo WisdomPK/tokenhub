@@ -154,7 +154,12 @@ try {
       requested.join(',') === 'KEY_A,KEY_C' && result.entries[0].masked === 'masked-current',
       requested.join(','),
     )
-    check('the stale snapshot call resolves without the abandoned identity', pending !== null)
+    const staleCaller = await pending
+    check(
+      'the caller that started before the invalidations settles on the final state',
+      staleCaller.error === null && staleCaller.entries[0].masked === 'masked-current',
+      JSON.stringify([staleCaller.error, staleCaller.entries.map((e) => e.masked)]),
+    )
   }
 
   // ================= identity changed between the read and the fetch =================
@@ -209,6 +214,135 @@ try {
     check('at least one request ran for every unique key', expected.concat('K0').every((key) => calls.includes(key)))
     check('concurrent requests never exceed eight', maxActive === 8, String(maxActive))
     check('duplicate-key rows still render', snap.entries.length === 13)
+  }
+
+  // ================= an old batch failure cannot poison the new generation =================
+  {
+    let accounts = identity([row('current', '', 'KEY_A', true, false)])
+    const deferred = new Map()
+    const requested = []
+    const fetchUsages = (keys) => {
+      const key = keys[0]
+      requested.push(key)
+      return new Promise((resolve, reject) => {
+        deferred.set(key, {
+          resolve: () => resolve(new Map([[key, reading(10)]])),
+          reject: () => reject(new Error('old batch exploded')),
+        })
+      })
+    }
+    const service = createSnapshotService({ readAccounts: async () => accounts, fetchUsages, now: () => 1000, refreshMs: 60000 })
+    const first = service.snapshot(true)
+    await waitFor(() => deferred.has('KEY_A'), 'the doomed batch')
+    accounts = identity([row('current', '', 'KEY_B', true, false)])
+    service.invalidate()
+    const second = service.snapshot(false)
+    await tick()
+    deferred.get('KEY_A').reject()
+    await waitFor(() => deferred.has('KEY_B'), 'the replacement batch')
+    deferred.get('KEY_B').resolve()
+    const result = await second
+    check(
+      'an old batch failure does not become the new snapshot',
+      result.error === null && result.entries.length === 1 && result.entries[0].masked === 'masked-current',
+      JSON.stringify([result.error, result.entries.map((e) => e.masked)]),
+    )
+    check('the failed old batch still triggers the new request', requested.join(',') === 'KEY_A,KEY_B', requested.join(','))
+    check('the caller that awaited the old batch also settles with the new state', (await first).error === null)
+  }
+
+  // ================= failed windows keep their last reading and freshness =================
+  {
+    const accounts = identity([row('current', '', 'KEY_A', true, false)])
+    let clock = 1000
+    let call = 0
+    const three = (rolling, weekly, monthly) => ({
+      error: null,
+      detail: null,
+      windows: {
+        rolling: { status: 'ok', percent: rolling, resetsAt: null },
+        weekly: { status: 'ok', percent: weekly, resetsAt: null },
+        monthly: { status: 'ok', percent: monthly, resetsAt: null },
+      },
+    })
+    const fetchUsages = async () => {
+      call += 1
+      if (call === 1) return new Map([['KEY_A', three(10, 20, 30)]])
+      if (call === 2) return new Map([['KEY_A', { error: 'network', detail: 'offline', windows: null }]])
+      return new Map([[
+        'KEY_A',
+        {
+          error: null,
+          detail: null,
+          windows: {
+            rolling: { status: 'ok', percent: 40, resetsAt: null },
+            weekly: { status: null, percent: null, resetsAt: null },
+            monthly: { status: 'ok', percent: 50, resetsAt: null },
+          },
+        },
+      ]])
+    }
+    const service = createSnapshotService({ readAccounts: async () => accounts, fetchUsages, now: () => clock, refreshMs: 60000 })
+    const first = await service.snapshot(true)
+    const firstWindow = first.entries[0].windows.rolling
+    check(
+      'a successful window carries its success time',
+      firstWindow.percent === 10 && firstWindow.stale === false && firstWindow.lastSuccessAt === 1000 && firstWindow.lastAttemptAt === 1000,
+      JSON.stringify(firstWindow),
+    )
+    clock = 2000
+    service.invalidate()
+    const failed = await service.snapshot(false)
+    const failedRolling = failed.entries[0].windows.rolling
+    check(
+      'a failed window keeps the previous reading and is marked stale',
+      failedRolling.percent === 10 && failedRolling.stale === true && failedRolling.error === 'network',
+      JSON.stringify(failedRolling),
+    )
+    check(
+      'the failed window records the attempt and preserves the success time',
+      failedRolling.lastAttemptAt === 2000 && failedRolling.lastSuccessAt === 1000,
+      JSON.stringify(failedRolling),
+    )
+    check('a whole-key failure marks every previously valid window stale', failed.entries[0].windows.weekly.stale === true && failed.entries[0].windows.monthly.stale === true)
+    clock = 3000
+    service.invalidate()
+    const recovered = await service.snapshot(false)
+    const rolling = recovered.entries[0].windows.rolling
+    const weekly = recovered.entries[0].windows.weekly
+    check('a recovered window is fresh again', rolling.percent === 40 && rolling.stale === false && rolling.lastSuccessAt === 3000, JSON.stringify(rolling))
+    check(
+      'a still-missing window keeps the older reading and success time',
+      weekly.percent === 20 && weekly.stale === true && weekly.lastSuccessAt === 1000 && weekly.lastAttemptAt === 3000,
+      JSON.stringify(weekly),
+    )
+  }
+
+  // ================= a current-generation batch failure keeps the last entries =================
+  {
+    const accounts = identity([row('current', '', 'KEY_A', true, false)])
+    let call = 0
+    const fetchUsages = async () => {
+      call += 1
+      if (call === 2) throw new Error('endpoint meltdown')
+      return new Map([['KEY_A', reading(10)]])
+    }
+    const service = createSnapshotService({ readAccounts: async () => accounts, fetchUsages, now: () => 1000, refreshMs: 60000 })
+    await service.snapshot(true)
+    service.invalidate()
+    const failed = await service.snapshot(false)
+    check(
+      'a batch failure returns an explicit error instead of an empty pool',
+      /^internal:/.test(failed.error || '') && failed.entries.length === 1,
+      JSON.stringify([failed.error, failed.entries.length]),
+    )
+    check(
+      'a batch failure preserves the previous reading as stale',
+      failed.entries[0].windows.rolling.percent === 10 && failed.entries[0].windows.rolling.stale === true,
+      JSON.stringify(failed.entries[0].windows.rolling),
+    )
+    const retried = await service.snapshot(false)
+    check('the next snapshot retries after a current-generation failure', call === 3 && retried.error === null, String(call) + '/' + String(retried.error))
   }
 
   // ================= dispose stops commits and aborts the batch =================

@@ -146,6 +146,49 @@ try {
     check('resets_at is accepted', Date.parse(row.windows.rolling.resetsAt) === Date.parse('2026-11-29T12:00:00Z'), String(row.windows.rolling.resetsAt))
   }
 
+  // ---- resetsAt / resets_at fallback and calendar validation ----
+  {
+    const resetPayload = (resetsAt, resets_at) => ({
+      usage: {
+        rolling: { status: 'ok', percent: 5, resetsAt, resets_at },
+        weekly: { status: 'ok', percent: 6 },
+        monthly: { status: 'ok', percent: 7 },
+      },
+    })
+    const expected = Date.parse('2026-11-29T12:00:00Z')
+    const fallback = async (label, resetsAt) => {
+      const row = await rowFor(resetPayload(resetsAt, '2026-11-29T12:00:00Z'))
+      check(label, Date.parse(row.windows.rolling.resetsAt) === expected, String(row.windows.rolling.resetsAt))
+    }
+    await fallback('resets_at is used when resetsAt is null', null)
+    await fallback('resets_at is used when resetsAt is empty', '')
+    await fallback('resets_at is used when resetsAt is garbage', 'not-a-time')
+    {
+      const row = await rowFor(resetPayload('2026-12-01T00:00:00Z', '2026-11-29T12:00:00Z'))
+      check(
+        'a valid resetsAt wins over resets_at',
+        Date.parse(row.windows.rolling.resetsAt) === Date.parse('2026-12-01T00:00:00Z'),
+        String(row.windows.rolling.resetsAt),
+      )
+    }
+    {
+      const row = await rowFor(resetPayload('2026-02-30T00:00:00Z', '2026-11-29T12:00:00Z'))
+      check(
+        'an impossible calendar date falls back instead of being normalized',
+        Date.parse(row.windows.rolling.resetsAt) === expected,
+        String(row.windows.rolling.resetsAt),
+      )
+    }
+    for (const [label, value] of [
+      ['February 30', '2026-02-30T00:00:00Z'],
+      ['April 31', '2026-04-31T00:00:00Z'],
+      ['month 13', '2026-13-01T00:00:00Z'],
+    ]) {
+      const row = await rowFor(resetPayload(value, undefined))
+      check('an impossible calendar date is rejected: ' + label, row.windows.rolling.resetsAt === null, String(row.windows.rolling.resetsAt))
+    }
+  }
+
   // ---- whole responses ----
   {
     const row = await rowFor({ usage: fixture.responses.partial })

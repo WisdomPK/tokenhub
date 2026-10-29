@@ -19,6 +19,7 @@ const KEY_D = 'sk-DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
 
 const ACCOUNT = '/plugins/dsh-tokenhub/account'
 const SWITCH = '/plugins/dsh-tokenhub/switch'
+const SNAP = '/plugins/dsh-tokenhub/snapshot'
 
 function makeStore(initial) {
   const refs = new Map(Object.entries(initial || {}))
@@ -307,8 +308,10 @@ try {
   // ================= partial rename: new name written, old name not removed =================
   {
     globalThis.fetch = standardFetch
-    const run = start({ OPENCODE_GO_KEY_src: KEY_B }, { keyNames: ['src'] })
+    const run = start({ OPENCODE_GO_KEY_src: KEY_B }, { keyNames: ['src', 'dst'] })
     store = run.store
+    const primed = (await request(run.ctx, SNAP)).body
+    check('the cache is primed with only the old name', primed.entries.length === 1 && primed.entries[0].name === 'src', JSON.stringify(primed.entries.map((e) => e.name)))
     const realUnset = store.unset.bind(store)
     store.unset = async (ref) => {
       if (ref === 'OPENCODE_GO_KEY_src') throw new Error('unset denied')
@@ -317,8 +320,15 @@ try {
     const renamed = await request(run.ctx, ACCOUNT, { op: 'rename', name: 'src', to: 'dst' })
     check('a partial rename is not reported as clean success', renamed.body.ok === false, JSON.stringify(renamed.body).slice(0, 180))
     check('the partial result says which half completed', /新名已写入|部分完成/.test(renamed.body.error || ''), renamed.body.error)
+    check('the partial result marks the credential state as changed', renamed.body.changed === true, JSON.stringify(renamed.body).slice(0, 180))
     check('the key remains reachable under the new name', store.refs.get('OPENCODE_GO_KEY_dst') === KEY_B)
     check('the old name is still there and reported', store.refs.get('OPENCODE_GO_KEY_src') === KEY_B)
+    const afterPartial = (await request(run.ctx, SNAP)).body
+    check(
+      'a partial rename invalidates the snapshot cache',
+      afterPartial.entries.length === 2 && afterPartial.entries.some((entry) => entry.name === 'dst'),
+      JSON.stringify(afterPartial.entries.map((entry) => entry.name)),
+    )
   }
 } catch (error) {
   results.push('CRASH  ' + String((error && error.stack) || error))

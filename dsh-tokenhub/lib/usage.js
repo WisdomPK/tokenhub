@@ -49,9 +49,33 @@ export function parsePercent(raw) {
 export function parseResetsAt(raw) {
   if (typeof raw !== 'string') return null
   const text = raw.trim()
-  if (text.length === 0) return null
-  const naive = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text)
-  const parsed = Date.parse(naive ? text.replace(' ', 'T') + 'Z' : text)
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?$/.exec(text)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = match[6] === undefined ? 0 : Number(match[6])
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null
+  // Date.parse would normalize 2026-02-30 into March; reject impossible calendar
+  // dates instead of quietly changing the reset day.
+  const calendar = new Date(0)
+  calendar.setUTCHours(0, 0, 0, 0)
+  calendar.setUTCFullYear(year, month - 1, day)
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== day
+  ) {
+    return null
+  }
+  const fraction = match[7] === undefined ? '' : '.' + match[7]
+  const zone = match[8] || 'Z'
+  const normalized =
+    match[1] + '-' + match[2] + '-' + match[3] + 'T' +
+    match[4] + ':' + match[5] + ':' + String(second).padStart(2, '0') + fraction + zone
+  const parsed = Date.parse(normalized)
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null
 }
 
@@ -60,11 +84,14 @@ export function pickWindow(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { status: null, percent: null, resetsAt: null }
   }
-  const reset = Object.prototype.hasOwnProperty.call(raw, 'resetsAt') ? raw.resetsAt : raw.resets_at
+  // Prefer resetsAt only while it parses; an absent/empty/garbage primary must
+  // not discard a usable legacy resets_at.
+  const primary = parseResetsAt(raw.resetsAt)
+  const resetsAt = primary !== null ? primary : parseResetsAt(raw.resets_at)
   return {
     status: typeof raw.status === 'string' ? raw.status : null,
     percent: parsePercent(raw.percent),
-    resetsAt: parseResetsAt(reset),
+    resetsAt,
   }
 }
 

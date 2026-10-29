@@ -243,7 +243,9 @@ export function createAccountService(credentials, options) {
 
   /** Candidate names: an explicit config list, else the document scan. */
   function discoverPoolNames() {
-    if (explicitNames) return explicitNames.slice()
+    // A repeated explicit name must not become a duplicate row or a second
+    // active entry; the pool is a set of names.
+    if (explicitNames) return Array.from(new Set(explicitNames.filter((name) => name.length > 0)))
     let text = ''
     try {
       if (existsSync(credentialsPath)) text = readFileSync(credentialsPath, 'utf8')
@@ -376,7 +378,7 @@ export function createAccountService(credentials, options) {
           // Only a read-back may call the rollback restored.
           restored = undo.ok && (await readBack(REF_CURRENT, previous))
         }
-        return fail(restored ? '读回校验失败，已恢复原账号' : '读回校验失败，状态待确认')
+        return fail(restored ? '读回校验失败，已恢复原账号' : '读回校验失败，状态待确认', { changed: !restored })
       }
 
       const marker = await writeCredential(() => credentials.set(REF_ACTIVE, target))
@@ -405,6 +407,7 @@ export function createAccountService(credentials, options) {
         activeMarker: marker.ok ? 'ok' : 'failed',
         opencodeAuth: authSync,
         warnings,
+        changed: true,
       })
     })
   }
@@ -454,11 +457,12 @@ export function createAccountService(credentials, options) {
       if (!(await readBack(ref, key))) {
         const undo = await writeCredential(() => credentials.unset(ref))
         const cleared = undo.ok && (await resolveRef(ref)) === null
-        return fail(cleared ? '写入后读回校验失败，已撤销本次写入' : '写入后读回校验失败，状态待确认')
+        return fail(cleared ? '写入后读回校验失败，已撤销本次写入' : '写入后读回校验失败，状态待确认', { changed: true })
       }
       return succeed({
         name: target,
         message: '已添加账号「' + target + '」' + lockNote(write.releasedLock),
+        changed: true,
       })
     })
   }
@@ -491,7 +495,7 @@ export function createAccountService(credentials, options) {
       if (!(await readBack(ref, current))) {
         const undo = await writeCredential(() => credentials.unset(ref))
         const cleared = undo.ok && (await resolveRef(ref)) === null
-        return fail(cleared ? '入池后读回校验失败，已撤销本次写入' : '入池后读回校验失败，状态待确认')
+        return fail(cleared ? '入池后读回校验失败，已撤销本次写入' : '入池后读回校验失败，状态待确认', { changed: true })
       }
 
       const marker = await writeCredential(() => credentials.set(REF_ACTIVE, target))
@@ -504,6 +508,7 @@ export function createAccountService(credentials, options) {
           (marker.ok ? '' : '；「使用中」标记写入失败：' + marker.error) +
           lockNote(write.releasedLock || marker.releasedLock),
         warnings,
+        changed: true,
       })
     })
   }
@@ -536,7 +541,7 @@ export function createAccountService(credentials, options) {
       if (!(await readBack(targetRef, entry.key))) {
         const undo = await writeCredential(() => credentials.unset(targetRef))
         const cleared = undo.ok && (await resolveRef(targetRef)) === null
-        return fail(cleared ? '新名写入后读回校验失败，已撤销写入' : '新名写入后读回校验失败，状态待确认')
+        return fail(cleared ? '新名写入后读回校验失败，已撤销写入' : '新名写入后读回校验失败，状态待确认', { changed: true })
       }
 
       // The marker names the entry in force, so it has to follow the rename or
@@ -559,12 +564,14 @@ export function createAccountService(credentials, options) {
           warnings: warnings.concat([{ code: 'partial-rename', message }]),
           name: to,
           partial: true,
+          changed: true,
         })
       }
       return succeed({
         name: to,
         message: '已把「' + from + '」改名为「' + to + '」' + markerNote + lockNote(write.releasedLock),
         warnings,
+        changed: true,
       })
     })
   }
@@ -591,8 +598,8 @@ export function createAccountService(credentials, options) {
       const ref = POOL_PREFIX + target
       const write = await writeCredential(() => credentials.unset(ref))
       if (!write.ok) return fail(write.error)
-      if ((await resolveRef(ref)) !== null) return fail('删除后读回校验失败，状态待确认')
-      return succeed({ name: target, message: '已删除账号「' + target + '」' })
+      if ((await resolveRef(ref)) !== null) return fail('删除后读回校验失败，状态待确认', { changed: true })
+      return succeed({ name: target, message: '已删除账号「' + target + '」', changed: true })
     })
   }
 
