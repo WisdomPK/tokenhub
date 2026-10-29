@@ -663,7 +663,10 @@ window.__ModuleLoader__.load({
       // that arrives late is dropped instead of replacing a newer identity.
       const loadSeq = React.useRef(0)
       const mounted = React.useRef(true)
-      React.useEffect(() => () => { mounted.current = false }, [])
+      React.useEffect(() => {
+        mounted.current = true
+        return () => { mounted.current = false }
+      }, [])
 
       const load = React.useCallback((force) => {
         const seq = loadSeq.current + 1
