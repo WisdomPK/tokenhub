@@ -60,8 +60,8 @@ STICKY_AUTO_CHECK_SECONDS = 5.0  # U02：auto sticky 判定节流
 
 class TokenHubApp:
     TICK_MS = 100
-    # U02：sticky 优先级 config > switch > tray > auto（高优先级占位时低优先级不替换）
-    STICKY_PRIORITY = {"config": 3, "auth": 3, "switch": 2, "tray": 1, "auto": 0}
+    # U02：sticky 优先级 config/switch > auth/tray > auto（低级不覆盖高级提示）
+    STICKY_PRIORITY = {"config": 3, "switch": 2, "auth": 1, "tray": 1, "auto": 0}
 
     def __init__(self):
         # 核心模块（按 plan Task A 规格）

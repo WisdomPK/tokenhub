@@ -340,6 +340,45 @@ class MainRefreshTests(unittest.TestCase):
         app.win.clear_transient.assert_called_once()
         self.assertEqual(app._identity_state_text(), "已配置")
 
+    def test_auth_read_error_does_not_replace_config_sticky(self):
+        app = self._app()
+        text = "配置无法读取，已保护原文件：C:/x"
+        app._set_sticky("config", text, "error")
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "认证文件读取失败（denied）"
+        app._reload_current_state()
+        self.assertEqual(app._sticky_reason, "config")
+        app.win.set_toast.assert_called_once_with(text, "error", sticky=True)
+        self.assertEqual(app._identity_state_text(), "认证文件读取失败")
+
+    def test_auth_read_error_does_not_replace_switch_sticky(self):
+        app = self._app()
+        text = "恢复失败，状态待确认；备份位于 C:/x"
+        app._set_sticky("switch", text, "error")
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "认证文件读取失败（denied）"
+        app._reload_current_state()
+        self.assertEqual(app._sticky_reason, "switch")
+        app.win.set_toast.assert_called_once_with(text, "error", sticky=True)
+
+    def test_auth_recovery_does_not_clear_preserved_config_sticky(self):
+        account = types.SimpleNamespace(key="k", label="账号")
+        app = self._app(accounts=(account,))
+        text = "配置无法读取，已保护原文件：C:/x"
+        app._set_sticky("config", text, "error")
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "认证文件读取失败（denied）"
+        app._reload_current_state()
+        app.store.current_key.return_value = "k"
+        app.store.last_error = None
+        app._reload_current_state()
+        self.assertEqual(app._sticky_reason, "config")
+        app.win.clear_transient.assert_not_called()
+        self.assertEqual(app._identity_state_text(), "已配置")
+
     def test_settings_current_key_helper_raises_on_auth_error(self):
         app = self._app()
         app.store = mock.Mock()
