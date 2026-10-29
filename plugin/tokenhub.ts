@@ -369,10 +369,11 @@ function isTimeoutError(e: unknown): boolean {
 /**
  * 官方切换通道：PUT {serverUrl}auth/opencode-go，payload {type:"api",key}（F5/C2 实证）。
  * Basic Auth 取 env OPENCODE_SERVER_USERNAME/OPENCODE_SERVER_PASSWORD（无密码则不带 header）。
- * 3s 超时。调用方必须区分三类结果：
+ * 3s 超时。调用方必须区分四类结果：
  *   - ok：宿主已确认写入；
  *   - timeout：请求可能已被宿主执行，先核对 auth 文件，不能盲目直写；
- *   - unreachable / rejected：未发生写入，才允许降级直写文件。
+ *   - unreachable：宿主不可达、未发生写入，才允许降级直写文件；
+ *   - rejected：宿主明确返回非 2xx，必须原样报告失败；不触碰 auth 文件。
  */
 async function apiSwitch(
   serverUrl: URL | string | undefined,
@@ -442,9 +443,11 @@ function collectBody(
 
 /**
  * 校验密钥（sk- 或 oc_sk_ 开头）→ API 优先 → 文件兜底。
- * timeout 与 unreachable 分开处理：timeout 只核对目标 auth 文件，
- * 确认目标 key 已写入 → 成功；无法确认 → uncertain，绝不再写一次文件。
- * unreachable / rejected（未发生写入）才走文件直写。
+ * timeout 与 unreachable / rejected 分开处理：
+ *   - timeout：只核对目标 auth 文件，确认目标 key 已写入 → 成功；
+ *     无法确认 → uncertain，绝不再写一次文件；
+ *   - rejected：宿主明确拒绝，直接返回失败（含宿主 HTTP 状态），不触碰 auth 文件；
+ *   - unreachable：宿主不可达，才允许文件直写。
  */
 async function respondSwitch(
   res: ServerResponse,
@@ -484,20 +487,28 @@ async function respondSwitch(
     });
     return;
   }
+  if (outcome.kind === "rejected") {
+    // 宿主明确拒绝：不降级写 auth.json，避免绕过宿主拒绝、造成文件与宿主状态分叉
+    console.warn(
+      `[tokenhub] 宿主接口拒绝切换（${outcome.detail}）；未写入认证文件`,
+    );
+    sendJson(res, 200, {
+      ok: false,
+      status: "host_rejected",
+      error: `宿主接口拒绝（${outcome.detail}）；未写入认证文件`,
+    });
+    return;
+  }
+  // 仅 unreachable：宿主不可达，降级直写 auth.json
   const result = writeAuthFile(key, input.authPath);
   if (result.ok) {
     sendJson(res, 200, { ok: true, method: "file" });
     return;
   }
-  const fileError = result.error ?? "未知错误";
   sendJson(res, 200, {
     ok: false,
     method: "file",
-    error:
-      outcome.kind === "rejected"
-        ? `宿主接口拒绝（${outcome.detail}）；文件降级失败: ${fileError}`
-        : fileError,
-    ...(outcome.kind === "rejected" ? { status: "host_rejected" } : {}),
+    error: result.error ?? "未知错误",
   });
 }
 

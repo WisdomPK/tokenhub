@@ -8,11 +8,13 @@
  *     tmp auth.json 的 opencode-go.key 变为新值，other 字段保留
  *  4. /switch 非 sk- key → 400
  *  5. dispose() 后控制端口不可再连
+ *  6. 宿主非 2xx（400/500）→ 明确失败，auth.json 字节不变、不产生备份
  *
  * 环境：TOKENHUB_DISABLE_SPAWN=1（不 spawn 假 exe）；OPENCODE_AUTH_PATH=<临时文件>。
  */
 import { strict as assert } from "node:assert";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -275,6 +277,30 @@ async function startHub(extra) {
   };
 }
 
+function startStatusStub(status) {
+  const server = createServer((req, res) => {
+    req.on("end", () => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "host says no" }));
+    });
+    req.resume();
+  });
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/`,
+        close: () =>
+          new Promise((done) => {
+            server.closeAllConnections();
+            server.close(() => done());
+          }),
+      });
+    });
+  });
+}
+
 function startSilentStub(onRequest) {
   const server = createServer(() => {
     onRequest();
@@ -389,6 +415,89 @@ assert.equal(readFileSync(timeoutPendingAuth, "utf8"), pendingBytes, "超时未�
 assert.deepEqual(backupsOf(timeoutPendingAuth), [], "超时未确认时不得产生备份");
 await hub10.hooks.dispose();
 await stubPending.close();
+
+// 11. 宿主非 2xx（400/500）拒绝 → 明确失败，绝不直写 auth.json
+const rejectedAuth = join(tmp, "host-rejected", "auth.json");
+mkdirSync(dirname(rejectedAuth), { recursive: true });
+const rejectedBytes = JSON.stringify(
+  {
+    "opencode-go": { type: "api", key: "sk-keep-current" },
+    other: { type: "api", key: "x" },
+  },
+  null,
+  2,
+);
+writeFileSync(rejectedAuth, rejectedBytes);
+for (const code of [400, 500]) {
+  const stubRejected = await startStatusStub(code);
+  const hub11 = await startHub({
+    serverUrl: new URL(stubRejected.url),
+    authPath: rejectedAuth,
+  });
+  const r11 = await hub11.switch(`sk-rejected-${code}`);
+  assert.equal(r11.status, 200, `宿主 ${code} 时控制接口仍应返回 200（业务失败）`);
+  assert.equal(r11.body.ok, false, `宿主 ${code} 拒绝不得报成功`);
+  assert.equal(r11.body.status, "host_rejected", `宿主 ${code} 应标记 host_rejected`);
+  assert.ok(
+    String(r11.body.error).includes(`HTTP ${code}`),
+    `错误应包含宿主状态码 ${code}`,
+  );
+  assert.ok(String(r11.body.error).includes("未写入"), "错误应明确说明未写认证文件");
+  assert.notEqual(r11.body.method, "file", "宿主拒绝不得声称认证文件已更新");
+  assert.equal(
+    readFileSync(rejectedAuth, "utf8"),
+    rejectedBytes,
+    `宿主 ${code} 拒绝后 auth.json 字节不变`,
+  );
+  assert.deepEqual(
+    backupsOf(rejectedAuth),
+    [],
+    `宿主 ${code} 拒绝后不得产生备份`,
+  );
+  await hub11.hooks.dispose();
+  await stubRejected.close();
+}
+
+// 12. 文件降级：目录创建/备份失败 → 明确失败，不建立目标、占位文件不变
+const blockedParent = join(tmp, "parent-is-file");
+const blockedBytes = "not a directory";
+writeFileSync(blockedParent, blockedBytes);
+const blockedAuth = join(blockedParent, "auth.json");
+const hub12 = await startHub({ authPath: blockedAuth });
+const r12 = await hub12.switch("sk-backup-fail");
+assert.equal(r12.body.ok, false, "备份/目录创建失败不得报成功");
+assert.ok(
+  String(r12.body.error).includes("备份 auth.json 失败"),
+  "应明确报告备份/目录创建失败",
+);
+assert.equal(readFileSync(blockedParent, "utf8"), blockedBytes, "占位文件不得被改动");
+assert.equal(existsSync(blockedAuth), false, "失败后不应出现目标 auth.json");
+await hub12.hooks.dispose();
+
+// 13. 文件降级：原子替换失败 → 报告原账号未受影响，auth.json 字节不变
+const roAuth = join(tmp, "readonly-auth", "auth.json");
+mkdirSync(dirname(roAuth), { recursive: true });
+const roBytes = JSON.stringify({
+  "opencode-go": { type: "api", key: "sk-readonly-old" },
+});
+writeFileSync(roAuth, roBytes);
+chmodSync(roAuth, 0o444); // Windows：置只读属性，使 rename 覆盖目标失败
+const hub13 = await startHub({ authPath: roAuth });
+const r13 = await hub13.switch("sk-readonly-new");
+assert.equal(r13.body.ok, false, "替换失败不得报成功");
+assert.equal(r13.body.method, "file");
+assert.ok(
+  String(r13.body.error).includes("原账号未受影响"),
+  "应明确说明原账号未受影响",
+);
+assert.equal(readFileSync(roAuth, "utf8"), roBytes, "替换失败后 auth.json 字节不变");
+assert.deepEqual(
+  readdirSync(dirname(roAuth)).filter((n) => n.includes(".tokenhub.tmp-")),
+  [],
+  "替换失败后不应残留临时文件",
+);
+await hub13.hooks.dispose();
+chmodSync(roAuth, 0o666); // 恢复可写，保证临时目录可清理
 
 if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
 else process.env.XDG_DATA_HOME = savedXdg;
