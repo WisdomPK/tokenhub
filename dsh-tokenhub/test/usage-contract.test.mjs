@@ -189,6 +189,28 @@ try {
     }
   }
 
+  // ---- shared fixture: an invalid primary time falls back per window ----
+  {
+    const row = await rowFor({ usage: fixture.responses['resetsAt-primary-invalid'] })
+    check(
+      'primary-invalid rolling falls back to the legacy resets_at',
+      row.windows.rolling.percent === 10 &&
+        Date.parse(row.windows.rolling.resetsAt) === Date.parse('2030-01-01T12:00:00Z'),
+      JSON.stringify([row.windows.rolling.percent, row.windows.rolling.resetsAt]),
+    )
+    check(
+      'primary-invalid weekly takes the valid primary resetsAt',
+      row.windows.weekly.percent === 20 &&
+        Date.parse(row.windows.weekly.resetsAt) === Date.parse('2030-01-02T12:00:00Z'),
+      JSON.stringify([row.windows.weekly.percent, row.windows.weekly.resetsAt]),
+    )
+    check(
+      'primary-invalid monthly has no reset time but keeps its percentage',
+      row.windows.monthly.percent === 30 && row.windows.monthly.resetsAt === null,
+      JSON.stringify([row.windows.monthly.percent, row.windows.monthly.resetsAt]),
+    )
+  }
+
   // ---- whole responses ----
   {
     const row = await rowFor({ usage: fixture.responses.partial })
@@ -242,7 +264,7 @@ try {
     globalThis.fetch = async () => ({ status: 200, ok: true, async json() { return fetchPayload } })
     const store = makeStore()
     const ctx = makeCtx(store)
-    apply(ctx, { keyNames: [], syncOpencodeAuth: false, refreshMs: 60000, timeoutMs: 1000 })
+    apply(ctx, { keyNames: ['probe', 'probe2'], syncOpencodeAuth: false, refreshMs: 60000, timeoutMs: 1000 })
     const accountRoute = '/plugins/dsh-tokenhub/account'
     const before = JSON.stringify(Array.from(store.refs.entries()))
     const refused = (await request(ctx, accountRoute, { op: 'add', name: 'probe', key: 'sk-NEWKEY000000000000000000000000000000000000000000000000000001' })).body

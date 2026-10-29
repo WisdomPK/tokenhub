@@ -83,13 +83,15 @@ OPENCODE_GO_KEY_<名> 的**数量与名字任意**。池为空时退化为单密
 | timeoutMs | 15000 | 单次请求超时 |
 | dshHome | resolveDshHome() | 覆盖 DSH home |
 | credentialsPath | <dshHome>/.credentials.yaml | 覆盖凭据文件位置 |
-| keyNames | 自动发现 | 显式指定池名，跳过文件扫描 |
+| keyNames | 自动发现 | 固定池名允许列表：配置后跳过文件扫描，新增 / 入池 / 改名的目标必须在此列表内 |
 | opencodeAuthPath | 自动解析 | 覆盖 opencode 的 auth.json 路径 |
 | syncOpencodeAuth | **false** | 切换时是否同时写 opencode 的 auth.json（默认关；开启后提示会注明 opencode 需重启） |
 | thresholds | {warn: 60, error: 85} | 阈值配色分档 |
 | scale | **2** | **悬浮球**尺寸倍数；面板与对话框不缩放（球变宽时面板会自动往左让开） |
 | autoReleaseWedgedLock | true | 写凭据撞上残留写锁时，是否判定后自动清理并重试 |
 | wedgedLockMinAgeMs | 30000 | 判定「残留」所需的最小静置时长（毫秒） |
+
+`keyNames` 是**固定允许列表**，不是发现提示：一旦配置（即使配成 `[]`），池中只列出这些名字，新增、入池、改名的目标名必须已在列表中。因此改名要先把新名加进 `keyNames`，在面板完成改名后再移除旧名。
 
 ## 工作原理
 

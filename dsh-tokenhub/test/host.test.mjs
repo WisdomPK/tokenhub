@@ -560,6 +560,111 @@ check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EAC
   )
 }
 
+// ---- explicit keyNames is a fixed allowlist for every mutation ----
+// A key stays reachable in the store by name. A name the fixed list cannot
+// discover would vanish from the panel, so the target must be listed before
+// anything is written.
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  st.refs.set('OPENCODE_GO_KEY_old', KEY_B)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['old'] })
+  await settle()
+  const explicitSnap = (await request(c, SNAP, { force: true })).body
+  check(
+    'an explicit list still discovers the listed entry',
+    explicitSnap.entries.some((e) => e.name === 'old' && e.inPool === true),
+    JSON.stringify(explicitSnap.entries.map((e) => e.name)),
+  )
+  const refsBefore = JSON.stringify(Array.from(st.refs.entries()).sort())
+  const refusedRename = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'rename', name: 'old', to: 'new' } })).body
+  check(
+    'an explicit list refuses a rename to an unlisted name',
+    refusedRename.ok === false && /keyNames/.test(refusedRename.error || ''),
+    JSON.stringify(refusedRename).slice(0, 200),
+  )
+  check(
+    'a refused rename leaves the credential untouched',
+    st.refs.get('OPENCODE_GO_KEY_old') === KEY_B &&
+      !st.refs.has('OPENCODE_GO_KEY_new') &&
+      JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore,
+    JSON.stringify(Array.from(st.refs.entries()).sort()),
+  )
+  const afterRenameSnap = (await request(c, SNAP, { force: true })).body
+  check(
+    'the account is still visible after a refused rename',
+    afterRenameSnap.entries.some((e) => e.name === 'old'),
+    JSON.stringify(afterRenameSnap.entries.map((e) => e.name)),
+  )
+
+  const refusedAdd = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'new', key: KEY_A } })).body
+  check(
+    'an explicit list refuses an add of an unlisted name',
+    refusedAdd.ok === false && /keyNames/.test(refusedAdd.error || ''),
+    JSON.stringify(refusedAdd).slice(0, 200),
+  )
+  check('a refused add writes no credential', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+
+  const refusedJoin = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'joinPool', name: 'new' } })).body
+  check(
+    'an explicit list refuses joining under an unlisted name',
+    refusedJoin.ok === false && /keyNames/.test(refusedJoin.error || ''),
+    JSON.stringify(refusedJoin).slice(0, 200),
+  )
+  check('a refused joinPool writes no credential', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+
+  const refusedBlank = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', key: KEY_A } })).body
+  check(
+    'an explicit list refuses a blank generated name',
+    refusedBlank.ok === false && /keyNames/.test(refusedBlank.error || ''),
+    JSON.stringify(refusedBlank).slice(0, 200),
+  )
+  check('a refused blank-name add writes no credential', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  st.refs.set('OPENCODE_GO_KEY_old', KEY_B)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['old', 'new'] })
+  await settle()
+  const renamed = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'rename', name: 'old', to: 'new' } })).body
+  check('a rename between two listed names succeeds', renamed.ok === true, JSON.stringify(renamed).slice(0, 200))
+  check(
+    'the listed rename moves the key and drops the old name',
+    st.refs.get('OPENCODE_GO_KEY_new') === KEY_B && !st.refs.has('OPENCODE_GO_KEY_old'),
+  )
+  const snapAfter = (await request(c, SNAP, { force: true })).body
+  check(
+    'the renamed account is visible under its new name',
+    snapAfter.entries.some((e) => e.name === 'new' && e.inPool === true),
+    JSON.stringify(snapAfter.entries.map((e) => e.name)),
+  )
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  st.refs.set('OPENCODE_GO_KEY_old', KEY_B)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: [] })
+  await settle()
+  const refsBefore = JSON.stringify(Array.from(st.refs.entries()).sort())
+  const emptyAdd = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'new', key: KEY_A } })).body
+  check(
+    'an empty explicit list allows no add',
+    emptyAdd.ok === false && /keyNames/.test(emptyAdd.error || ''),
+    JSON.stringify(emptyAdd).slice(0, 200),
+  )
+  const emptyRename = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'rename', name: 'old', to: 'new' } })).body
+  check(
+    'an empty explicit list allows no rename',
+    emptyRename.ok === false && /keyNames/.test(emptyRename.error || ''),
+    JSON.stringify(emptyRename).slice(0, 200),
+  )
+  check('the empty explicit list writes nothing', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+}
+
 // ---- a failed window keeps its last reading and is marked stale on the wire ----
 {
   const liveFetch = globalThis.fetch
@@ -648,7 +753,7 @@ check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EAC
   const c = makeCtx(st)
   const originalError = console.error
   console.error = () => {}
-  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: [] })
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
   await settle()
   const failedAdd = await Promise.race([
     request(c, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'go9', key: KEY_A } }),

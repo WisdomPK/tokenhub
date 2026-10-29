@@ -174,6 +174,26 @@ export function createAccountService(credentials, options) {
   } = options
 
   /**
+   * A configured keyNames list is a fixed allowlist, not a discovery hint: the
+   * pool may only ever hold these names, and every mutation target must already
+   * be listed. Null means discovery mode, where the document scan decides.
+   * Duplicates are collapsed so discovery and the allowlist agree.
+   */
+  const allowedNames =
+    explicitNames === null ? null : new Set(explicitNames.filter((name) => name.length > 0))
+
+  /** Whether a target name may be created or filed; discovery allows any legal name. */
+  const nameAllowed = (name) => allowedNames === null || allowedNames.has(name)
+
+  /** Shared refusal for an add/join/rename target outside the fixed list. */
+  const unlistedNameError = (name) =>
+    '账号名「' + name + '」不在配置 keyNames 允许列表中，请先修改配置 keyNames 后再试'
+
+  /** A blank add cannot generate a name in explicit mode. */
+  const MSG_BLANK_EXPLICIT =
+    '已配置 keyNames 固定允许列表，新增账号请填写列表中的账号名；如需自动命名，请先移除 keyNames 配置'
+
+  /**
    * Resolve one reference. A missing value is null; a storage failure is an
    * error with its cause attached, never an empty pool.
    */
@@ -241,11 +261,13 @@ export function createAccountService(credentials, options) {
   /** Suffix for a message about a write that had to clear a wedged lock. */
   const lockNote = (released) => (released ? '；已清理残留写锁 ' + released : '')
 
-  /** Candidate names: an explicit config list, else the document scan. */
+  /** Candidate names: the explicit allowlist, else the document scan. */
   function discoverPoolNames() {
-    // A repeated explicit name must not become a duplicate row or a second
-    // active entry; the pool is a set of names.
-    if (explicitNames) return Array.from(new Set(explicitNames.filter((name) => name.length > 0)))
+    // In explicit mode keyNames is the whole pool: every listed name stays
+    // discoverable (and therefore operable) across restarts, and no unlisted
+    // name can appear. A repeated name must not become a duplicate row; the
+    // set already collapsed it.
+    if (allowedNames !== null) return Array.from(allowedNames)
     let text = ''
     try {
       if (existsSync(credentialsPath)) text = readFileSync(credentialsPath, 'utf8')
@@ -425,10 +447,14 @@ export function createAccountService(credentials, options) {
       const named = validatePoolName(requested)
       if (!named.ok) return fail(named.error)
       requestedName = named.name
+      // A fixed allowlist refuses a target it could never discover again.
+      if (!nameAllowed(requestedName)) return fail(unlistedNameError(requestedName))
       // Fast refusal; the authoritative check runs again inside the queue.
       if (await isConfigured(POOL_PREFIX + requestedName)) {
         return fail('账号「' + requestedName + '」已存在')
       }
+    } else if (allowedNames !== null) {
+      return fail(MSG_BLANK_EXPLICIT)
     }
     if (!KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
       return fail('密钥需以 sk- 或 oc_sk_ 开头')
@@ -477,6 +503,7 @@ export function createAccountService(credentials, options) {
     const named = validatePoolName(rawName)
     if (!named.ok) return fail(named.error)
     const target = named.name
+    if (!nameAllowed(target)) return fail(unlistedNameError(target))
 
     return enqueueMutation(async () => {
       const current = await readCurrent()
@@ -526,13 +553,17 @@ export function createAccountService(credentials, options) {
     if (!destination.ok) return fail(destination.error)
     const from = source.name
     const to = destination.name
+    // Refuse before anything is written: a new name the fixed list cannot
+    // discover would make the account vanish from the panel after the rename.
+    if (!nameAllowed(to)) return fail(unlistedNameError(to))
     if (from === to) return succeed({ name: to, message: '名称未变化' })
 
     return enqueueMutation(async () => {
       const pool = await resolvePool()
       const entry = pool.find((item) => item.name === from)
       if (!entry) return fail('账号「' + from + '」不存在')
-      // describe sees targets the scan may not list (explicit keyNames files).
+      // The target is already in the explicit allowlist (checked before the
+      // queue); describe still catches a configured target the scan cannot list.
       if (await isConfigured(POOL_PREFIX + to)) return fail('账号「' + to + '」已存在')
 
       const targetRef = POOL_PREFIX + to

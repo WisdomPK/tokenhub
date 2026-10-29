@@ -83,13 +83,15 @@ Add a config block to the plugin row in your profile's cordis.patch.yml:
 | timeoutMs | 15000 | Per-request timeout |
 | dshHome | resolveDshHome() | Override the DSH home directory |
 | credentialsPath | <dshHome>/.credentials.yaml | Override the credential document |
-| keyNames | auto-discovered | Explicit pool names, skipping the document scan |
+| keyNames | auto-discovered | Fixed allowlist of pool names: when set, the document scan is skipped and add / join-pool / rename targets must be in this list |
 | opencodeAuthPath | auto-resolved | Override opencode's auth.json |
 | syncOpencodeAuth | **false** | Also write opencode's auth.json on a switch (off by default; when on, the result says opencode needs a restart) |
 | thresholds | {warn: 60, error: 85} | Colour bands |
 | scale | **2** | Size multiplier for the **gauge** only; the panel and dialogs keep their own size (the panel steps aside when the gauge widens) |
 | autoReleaseWedgedLock | true | Judge and clear a leftover write lock, then retry |
 | wedgedLockMinAgeMs | 30000 | How long an incomplete lock record must sit before it counts as leftover |
+
+`keyNames` is a **fixed allowlist**, not a discovery hint: when it is set (even to `[]`), the pool lists exactly those names, and every add, join-pool, or rename target must already be in the list. Renaming therefore starts in the config — add the new name to `keyNames`, rename in the panel, then drop the old name.
 
 ## How it works
 

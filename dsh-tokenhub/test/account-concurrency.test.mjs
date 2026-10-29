@@ -131,7 +131,7 @@ try {
       }
       return { status: 200, ok: true, async json() { return usageFor(key) } }
     }
-    const run = start({})
+    const run = start({}, { keyNames: ['race'] })
     store = run.store
     const first = request(run.ctx, ACCOUNT, { op: 'add', name: 'race', key: KEY_A })
     const second = request(run.ctx, ACCOUNT, { op: 'add', name: 'race', key: KEY_B })
@@ -172,7 +172,7 @@ try {
     const run = start({
       OPENCODE_GO_API_KEY: KEY_A,
       OPENCODE_GO_KEY_src: KEY_B,
-    }, { keyNames: ['src'] })
+    }, { keyNames: ['src', 'dst'] })
     store = run.store
     let releaseRename
     const renameGate = new Promise((r) => { releaseRename = r })
@@ -242,7 +242,7 @@ try {
   // ================= a failed operation does not wedge the queue =================
   {
     globalThis.fetch = standardFetch
-    const run = start({})
+    const run = start({}, { keyNames: ['after'] })
     store = run.store
     const failed = await request(run.ctx, ACCOUNT, { op: 'add', name: 'bad name', key: KEY_A })
     check('an invalid name fails', failed.body.ok === false && /账号名/.test(failed.body.error || ''), failed.body.error)
@@ -277,7 +277,7 @@ try {
     check('the old-client message also names the warning', /标记/.test(switched.body.message || ''), switched.body.message)
   }
 
-  // ================= describe catches targets the pool scan cannot list =================
+  // ================= describe catches an already configured target =================
   {
     globalThis.fetch = standardFetch
     const run = start(
@@ -286,23 +286,23 @@ try {
         OPENCODE_GO_KEY_go1: KEY_B,
         OPENCODE_GO_KEY_hidden: KEY_C,
       },
-      { keyNames: ['go1'] },
+      { keyNames: ['go1', 'hidden'] },
     )
     store = run.store
     const renameHidden = await request(run.ctx, ACCOUNT, { op: 'rename', name: 'go1', to: 'hidden' })
     check(
-      'rename refuses an unlisted but configured target',
+      'rename refuses a target already configured in the store',
       renameHidden.body.ok === false && /已存在/.test(renameHidden.body.error || ''),
       JSON.stringify(renameHidden.body).slice(0, 160),
     )
-    check('the unlisted credential is not overwritten', store.refs.get('OPENCODE_GO_KEY_hidden') === KEY_C)
+    check('the configured credential is not overwritten', store.refs.get('OPENCODE_GO_KEY_hidden') === KEY_C)
     const joinHidden = await request(run.ctx, ACCOUNT, { op: 'joinPool', name: 'hidden' })
     check(
-      'joinPool refuses an unlisted but configured target',
+      'joinPool refuses a target already configured in the store',
       joinHidden.body.ok === false && /已存在/.test(joinHidden.body.error || ''),
       JSON.stringify(joinHidden.body).slice(0, 160),
     )
-    check('the unlisted credential survives joinPool', store.refs.get('OPENCODE_GO_KEY_hidden') === KEY_C)
+    check('the configured credential survives joinPool', store.refs.get('OPENCODE_GO_KEY_hidden') === KEY_C)
   }
 
   // ================= partial rename: new name written, old name not removed =================
