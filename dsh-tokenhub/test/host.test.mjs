@@ -617,6 +617,7 @@ const authCase = (store, override) => {
   return c
 }
 const savedAuthEnv = process.env.OPENCODE_AUTH_PATH
+const savedXdg = process.env.XDG_DATA_HOME
 const savedRealDate = globalThis.Date
 try {
   const explicitPath = join(dir, 'explicit-auth.json')
@@ -637,6 +638,41 @@ try {
   }
   check('the environment candidate is byte-identical', readFileSync(envPath).equals(envBefore))
   check('the switch itself succeeded', missingOverrideSwitch.ok === true, JSON.stringify(missingOverrideSwitch).slice(0, 160))
+
+  // override missing, an auto-discovered default exists
+  const xdgHome = join(dir, 'xdg-home')
+  mkdirSync(join(xdgHome, 'opencode'), { recursive: true })
+  const xdgAuth = join(xdgHome, 'opencode', 'auth.json')
+  writeAuth(xdgAuth, KEY_B, { other: { keep: 'xdg' } })
+  const xdgBefore = readFileSync(xdgAuth)
+  rmSync(explicitPath, { force: true })
+  process.env.OPENCODE_AUTH_PATH = ''
+  process.env.XDG_DATA_HOME = xdgHome
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const autoMissingSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  check('a missing explicit target is created even when the default exists', existsSync(explicitPath), String(existsSync(explicitPath)))
+  check('the auto-discovered default is untouched', readFileSync(xdgAuth).equals(xdgBefore))
+  check('creating the explicit target still switches dsh', autoMissingSwitch.ok === true, JSON.stringify(autoMissingSwitch).slice(0, 160))
+
+  // override corrupt, an auto-discovered default is valid
+  writeFileSync(explicitPath, '{ not json', 'utf8')
+  const corruptAutoBefore = readFileSync(explicitPath)
+  const xdgBefore2 = readFileSync(xdgAuth)
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const corruptAutoSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  check(
+    'a corrupt explicit target is reported even when the default is valid',
+    corruptAutoSwitch.ok === true && corruptAutoSwitch.warnings.some((w) => w.code === 'opencode-auth'),
+    JSON.stringify(corruptAutoSwitch.warnings),
+  )
+  check('the corrupt explicit file stays untouched', readFileSync(explicitPath).equals(corruptAutoBefore))
+  check('the valid auto-discovered default stays untouched', readFileSync(xdgAuth).equals(xdgBefore2))
+  process.env.OPENCODE_AUTH_PATH = envPath
+  delete process.env.XDG_DATA_HOME
 
   // override corrupt, the environment candidate is valid
   writeFileSync(explicitPath, '{ not json', 'utf8')
@@ -720,6 +756,8 @@ try {
 } finally {
   process.env.OPENCODE_AUTH_PATH = savedAuthEnv
   if (savedAuthEnv === undefined) delete process.env.OPENCODE_AUTH_PATH
+  process.env.XDG_DATA_HOME = savedXdg
+  if (savedXdg === undefined) delete process.env.XDG_DATA_HOME
   globalThis.Date = savedRealDate
 }
 
