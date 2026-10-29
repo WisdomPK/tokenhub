@@ -1,0 +1,53 @@
+name: TokenHub tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Desktop plugin smoke test
+        run: node plugin/smoke_test.mjs
+
+      # main 分支没有 dsh-tokenhub/；用 step 级文件检查显式跳过，
+      # 不依赖 hashFiles 在空工作区的判定。
+      - name: Detect dsh plugin
+        id: dsh
+        run: |
+          if (Test-Path dsh-tokenhub/package.json) {
+            "present=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "present=false" >> $env:GITHUB_OUTPUT
+            Write-Output "dsh-tokenhub/package.json not found; skipping dsh tests"
+          }
+
+      - name: Install dsh test dependencies
+        if: steps.dsh.outputs.present == 'true'
+        working-directory: dsh-tokenhub
+        run: npm install --no-audit --no-fund
+
+      - name: dsh tests
+        if: steps.dsh.outputs.present == 'true'
+        working-directory: dsh-tokenhub
+        run: npm test
