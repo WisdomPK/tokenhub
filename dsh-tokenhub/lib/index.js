@@ -314,24 +314,29 @@ function scanPoolNames(text) {
 // ------------------------------------------------- opencode auth.json sync
 
 /**
- * Resolve the opencode auth document the way TokenHub does: an explicit override
- * first, then the documented locations, preferring whichever one actually
- * carries the opencode-go field.
+ * Resolve the opencode auth document: an explicit override, then an explicit
+ * environment path, then automatic discovery.
+ *
+ * An explicit path is the only target. If it is missing the sync creates it
+ * there; if it is corrupt the sync reports that target's problem. It must never
+ * silently move the write to another file that happens to look healthier.
  * @returns the path to read and write.
  */
 function resolveOpencodeAuthPath(override) {
+  const explicit = [override, process.env.OPENCODE_AUTH_PATH].find(
+    (candidate) => typeof candidate === 'string' && candidate.length > 0,
+  )
+  if (explicit) return explicit
+
   const home = homedir()
   const xdg = process.env.XDG_DATA_HOME
   const candidates = [
-    override,
-    process.env.OPENCODE_AUTH_PATH,
     xdg ? join(xdg, 'opencode', 'auth.json') : null,
     join(home, '.local', 'share', 'opencode', 'auth.json'),
     join(home, '.opencode', 'auth.json'),
   ].filter((candidate) => typeof candidate === 'string' && candidate.length > 0)
 
   const existing = candidates.filter((candidate) => existsSync(candidate))
-  if (existing.length === 0) return candidates[0]
   for (const candidate of existing) {
     try {
       const parsed = readJsonFile(candidate)
@@ -340,7 +345,7 @@ function resolveOpencodeAuthPath(override) {
       /* keep looking for a candidate that parses */
     }
   }
-  return existing[0]
+  return existing.length > 0 ? existing[0] : candidates[0]
 }
 
 /** Keep the newest N backups and drop older ones. Best effort: never blocks the write. */

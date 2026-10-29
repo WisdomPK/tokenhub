@@ -5,7 +5,7 @@
 //
 //   node test/host.test.mjs
 
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -532,6 +532,137 @@ rmSync(lockPath, { force: true })
 lc = lockingCtx(() => new Error('EACCES: permission denied, open the credentials file'))
 lr = (await addGo7(lc.ctx)).body
 check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EACCES/.test(lr.error || ''), lr.error)
+
+// ---- an explicit auth path is the only target ----
+// The review found the old resolver treating an explicit path as a candidate:
+// a missing or corrupt override silently moved the write to another file.
+const writeAuth = (target, key, extra) =>
+  writeFileSync(target, JSON.stringify(Object.assign({ 'opencode-go': { type: 'api', key } }, extra || {}), null, 2), 'utf8')
+const authStoreFor = (current, pool) => {
+  const s = makeStore()
+  s.refs.set('OPENCODE_GO_API_KEY', current)
+  for (const [name, key] of Object.entries(pool)) s.refs.set('OPENCODE_GO_KEY_' + name, key)
+  return s
+}
+const authCase = (store, override) => {
+  const c = makeCtx(store)
+  const names = Array.from(store.refs.keys())
+    .filter((entry) => entry.startsWith('OPENCODE_GO_KEY_'))
+    .map((entry) => entry.slice('OPENCODE_GO_KEY_'.length))
+  apply(c, {
+    credentialsPath: credPath,
+    opencodeAuthPath: override,
+    syncOpencodeAuth: true,
+    keyNames: names,
+  })
+  return c
+}
+const savedAuthEnv = process.env.OPENCODE_AUTH_PATH
+const savedRealDate = globalThis.Date
+try {
+  const explicitPath = join(dir, 'explicit-auth.json')
+  const envPath = join(dir, 'env-auth.json')
+  rmSync(explicitPath, { force: true })
+
+  // override missing, the environment candidate exists and carries opencode-go
+  writeAuth(envPath, KEY_B, { other: { keep: 'env' } })
+  const envBefore = readFileSync(envPath)
+  process.env.OPENCODE_AUTH_PATH = envPath
+  let authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  let authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const missingOverrideSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  check('a missing explicit target is created instead of falling back', existsSync(explicitPath), String(existsSync(explicitPath)))
+  if (existsSync(explicitPath)) {
+    check('the explicit target received the key', JSON.parse(readFileSync(explicitPath, 'utf8'))['opencode-go'].key === KEY_A)
+  }
+  check('the environment candidate is byte-identical', readFileSync(envPath).equals(envBefore))
+  check('the switch itself succeeded', missingOverrideSwitch.ok === true, JSON.stringify(missingOverrideSwitch).slice(0, 160))
+
+  // override corrupt, the environment candidate is valid
+  writeFileSync(explicitPath, '{ not json', 'utf8')
+  const corruptBefore = readFileSync(explicitPath)
+  const envBefore2 = readFileSync(envPath)
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const corruptSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  check('a corrupt explicit target is reported, not bypassed', corruptSwitch.ok === true && Array.isArray(corruptSwitch.warnings) && corruptSwitch.warnings.some((w) => w.code === 'opencode-auth'), JSON.stringify(corruptSwitch.warnings))
+  check('the corrupt explicit file is untouched', readFileSync(explicitPath).equals(corruptBefore))
+  check('the valid environment file is untouched', readFileSync(envPath).equals(envBefore2))
+  process.env.OPENCODE_AUTH_PATH = savedAuthEnv
+  if (savedAuthEnv === undefined) delete process.env.OPENCODE_AUTH_PATH
+
+  // BOM in the target must not stop the sync; unrelated fields survive
+  writeFileSync(explicitPath, '\uFEFF' + JSON.stringify({ 'opencode-go': { type: 'api', key: KEY_B }, other: { keep: 3 } }, null, 2), 'utf8')
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const bomSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  const bomDoc = JSON.parse(readFileSync(explicitPath, 'utf8').replace(/^\uFEFF/, ''))
+  check('a BOM-prefixed auth file is readable and writable', bomSwitch.ok === true && bomSwitch.opencodeAuth && bomSwitch.opencodeAuth.ok === true, JSON.stringify(bomSwitch.opencodeAuth))
+  check('the BOM file keeps unrelated fields and receives the key', bomDoc['opencode-go'].key === KEY_A && bomDoc.other.keep === 3)
+
+  // backup failure must not write the target
+  const originalDoc = readFileSync(explicitPath)
+  const RealDate = globalThis.Date
+  const fixedWhen = new RealDate('2030-05-06T07:08:09.010Z')
+  globalThis.Date = class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(fixedWhen.getTime())
+      else super(...args)
+    }
+    static now() { return fixedWhen.getTime() }
+  }
+  const backupDir = explicitPath + '.tokenhub.bak-' + fixedWhen.toISOString().replace(/[:.]/g, '-')
+  mkdirSync(backupDir, { recursive: true })
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const backupFailSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  check('a failed backup is reported, not hidden', backupFailSwitch.ok === true && backupFailSwitch.warnings.some((w) => w.code === 'opencode-auth'), JSON.stringify(backupFailSwitch.warnings))
+  check('a failed backup leaves the auth file untouched', readFileSync(explicitPath).equals(originalDoc))
+  rmSync(backupDir, { recursive: true, force: true })
+
+  // a failed replacement leaves the original intact
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, explicitPath)
+  await settle()
+  const beforeReplace = readFileSync(explicitPath)
+  chmodSync(explicitPath, 0o444)
+  const replaceFailSwitch = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+  chmodSync(explicitPath, 0o666)
+  check('a failed replacement is reported, not hidden', replaceFailSwitch.ok === true && replaceFailSwitch.warnings.some((w) => w.code === 'opencode-auth'), JSON.stringify(replaceFailSwitch.warnings))
+  check('a failed replacement preserves the original bytes', readFileSync(explicitPath).equals(beforeReplace))
+  globalThis.Date = RealDate
+
+  // only the newest five backups survive
+  const retainPath = join(dir, 'retain-auth.json')
+  writeAuth(retainPath, KEY_B)
+  authStore = authStoreFor(KEY_B, { go1: KEY_A, go2: KEY_B })
+  authCtx2 = authCase(authStore, retainPath)
+  await settle()
+  for (let i = 0; i < 7; i += 1) {
+    const when = new RealDate(Date.UTC(2031, 0, 1, 0, 0, i))
+    globalThis.Date = class extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(when.getTime())
+        else super(...args)
+      }
+      static now() { return when.getTime() }
+    }
+    const target = i % 2 === 0 ? 'go1' : 'go2'
+    const result = (await request(authCtx2, SWITCH, { method: 'POST', body: { name: target } })).body
+    check('retention switch ' + (i + 1) + ' succeeded', result.ok === true, JSON.stringify(result).slice(0, 120))
+  }
+  globalThis.Date = RealDate
+  const backups = readdirSync(dir).filter((f) => f.startsWith('retain-auth.json.tokenhub.bak-'))
+  check('the newest five backups are kept', backups.length === 5, String(backups.length))
+} finally {
+  process.env.OPENCODE_AUTH_PATH = savedAuthEnv
+  if (savedAuthEnv === undefined) delete process.env.OPENCODE_AUTH_PATH
+  globalThis.Date = savedRealDate
+}
 
 console.log(results.join('\n'))
 const failed = results.filter((r) => r.startsWith('FAIL')).length
