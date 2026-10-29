@@ -668,9 +668,8 @@ class TokenHubApp:
         UI 已完成真实校验；空标签补默认名；写入配置（自动落盘）。
         保存失败（含 ConfigWriteBlocked）→ (False, msg) 并保留错误 toast，
         弹窗据此保持打开、保留输入；成功 → (True, "")。
+        空标签直接交给 Config.upsert_account 生成唯一默认名。
         """
-        if not label or not label.strip():
-            label = self._next_default_label()
         try:
             self.cfg.upsert_account(label, key)  # 变更即落盘
         except ConfigWriteBlocked as e:
@@ -709,13 +708,6 @@ class TokenHubApp:
         self._update_ui_accounts()
         self._force_refresh_now()
         return (True, "")
-
-    def _next_default_label(self) -> str:
-        """默认标签：账号N；N=现有 accounts 数+1，避开已用名（与 Config 语义一致）。"""
-        n = max(1, len(self.cfg.accounts) + 1)
-        while any(a.label == f"账号{n}" for a in self.cfg.accounts):
-            n += 1
-        return f"账号{n}"
 
     def on_settings(self):
         log_ui_action("settings")

@@ -345,21 +345,6 @@ class SettingsWindow:
         self._key_entry.delete(0, 'end')
         self._key_entry.insert(0, text)
 
-    def _next_default_label(self) -> str:
-        accounts = getattr(self.config, 'accounts', []) or []
-        used = set()
-        for a in accounts:
-            lbl = getattr(a, 'label', '') or ''
-            if lbl.startswith('账号'):
-                try:
-                    used.add(int(lbl[2:]))
-                except ValueError:
-                    pass
-        n = 1
-        while n in used:
-            n += 1
-        return f'账号{n}'
-
     def _add_account(self) -> None:
         label = self._label_entry.get().strip()
         key = self._key_entry.get().strip()
@@ -369,8 +354,7 @@ class SettingsWindow:
         if not (key.startswith('sk-') or key.startswith('oc_sk_')):
             messagebox.showwarning('提示', '密钥应以 sk- 或 oc_sk_ 开头', parent=self.window)
             return
-        if not label:
-            label = self._next_default_label()
+        # 空标签交给 Config 统一生成默认名（唯一来源，UI 不自编号）
 
         self._add_btn.configure(state='disabled', text='校验中…')
 
@@ -403,7 +387,7 @@ class SettingsWindow:
             self._inline_feedback(f'校验失败：{err}', ok=False)
             return
         try:
-            self.config.upsert_account(label, key)  # R3-04：方法内已自落盘
+            saved = self.config.upsert_account(label, key)  # R3-04：方法内已自落盘
         except Exception as exc:
             self._inline_feedback(f'保存失败：{exc}', ok=False)
             return
@@ -411,7 +395,8 @@ class SettingsWindow:
         self._refresh_accounts()
         self._key_entry.delete(0, 'end')
         self._label_entry.delete(0, 'end')
-        self._inline_feedback(f'已添加「{label}」并通过密钥校验')
+        shown = getattr(saved, 'label', '') or label or '新账号'
+        self._inline_feedback(f'已添加「{shown}」并通过密钥校验')
 
     def _rename_account(self, key: str) -> None:
         account = self._find_account(key)

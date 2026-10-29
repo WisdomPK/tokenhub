@@ -51,7 +51,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable, Optional
 
-from api import display_percent
+from api import display_percent, remaining_seconds
 from config import Config  # 掩码唯一规则（config 不 import UI，无循环依赖）
 from dialogs import AddAccountDialog, ConfirmDialog
 from logger import log_exception  # tick 块级失败诊断（§7.2）
@@ -1142,30 +1142,17 @@ class FloatingWindow:
     @staticmethod
     def _format_countdown(resets_at, now=None) -> str:
         """resetsAt(ISO8601) → '3H25M' / '4天3H' / '即将重置' / '--'。
-        <24h：大写 H/M、无空格；≥24h：N天H（不带分钟）；已过期：即将重置。"""
-        if not resets_at:
+        <24h：大写 H/M、无空格；≥24h：N天H（不带分钟）；已过期：即将重置。
+        剩余秒数与 api.format_countdown 共用 remaining_seconds（仅文案格式不同）。"""
+        seconds = remaining_seconds(resets_at, now)
+        if seconds is None:
             return '--'
-        try:
-            if isinstance(resets_at, datetime.datetime):
-                dt = resets_at
-            else:
-                s = str(resets_at).strip()
-                if s.endswith('Z'):
-                    s = s[:-1] + '+00:00'
-                dt = datetime.datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=datetime.timezone.utc)
-            if now is None:
-                now = datetime.datetime.now(datetime.timezone.utc)
-            delta = (dt - now).total_seconds()
-        except Exception:
-            return '--'
-        if delta <= 0:
+        if seconds <= 0:
             return '即将重置'
-        total_h = delta / 3600.0
+        total_h = seconds / 3600.0
         if total_h < 24:
             h = int(total_h)
-            m = int((delta % 3600) // 60)
+            m = int((seconds % 3600) // 60)
             return f'{h}H{m}M'
         d = int(total_h // 24)
         h = int(total_h % 24)

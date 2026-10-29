@@ -9,6 +9,7 @@ import sys
 import time
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -281,6 +282,28 @@ class MainRefreshTests(unittest.TestCase):
         old_usage = args[2][0][1]
         self.assertEqual(old_usage.rolling.percent, 1.0)
         self.assertIn("old", kwargs["views"])
+
+
+class SharedCountdownTests(unittest.TestCase):
+
+    def test_floating_countdown_uses_shared_core(self):
+        with mock.patch("floating_window.remaining_seconds", return_value=3600) as core:
+            self.assertEqual(FloatingWindow._format_countdown("ignored"), "1H0M")
+            core.assert_called_once()
+
+    def test_utc_expired_and_invalid(self):
+        now = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            FloatingWindow._format_countdown("2026-01-01T04:59:00Z", now), "4H59M")
+        self.assertEqual(
+            FloatingWindow._format_countdown("2025-12-31T23:59:00Z", now), "即将重置")
+        self.assertEqual(FloatingWindow._format_countdown("not-a-time", now), "--")
+        self.assertEqual(FloatingWindow._format_countdown("", now), "--")
+
+    def test_naive_time_treated_as_utc(self):
+        now = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            FloatingWindow._format_countdown("2026-01-01 04:59:00", now), "4H59M")
 
 
 if __name__ == "__main__":

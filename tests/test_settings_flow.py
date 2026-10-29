@@ -5,6 +5,7 @@
 """
 
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from api import AccountUsage, UsageMetric  # noqa: E402
 from main import TokenHubApp  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
 from settings_window import SettingsWindow  # noqa: E402
@@ -146,6 +148,45 @@ class SaveOptionsTests(unittest.TestCase):
         sw._cancel.assert_not_called()
         sw._inline_feedback.assert_called_once()
         self.assertEqual(sw._inline_feedback.call_args.kwargs.get("ok"), False)
+
+
+class DefaultNamingTests(unittest.TestCase):
+
+    def test_ui_add_with_empty_label_lets_config_name_it(self):
+        calls = []
+        sw = _settings_window(on_save=lambda: calls.append(1))
+        sw._label_entry.get.return_value = ""
+        sw._key_entry.get.return_value = "sk-new-key-0001"
+        sw.api = mock.Mock()
+        sw.api.fetch_usage.return_value = AccountUsage(
+            "sk-new-key-0001",
+            UsageMetric("ok", 1.0, None),
+            UsageMetric("ok", 2.0, None),
+            UsageMetric("ok", 3.0, None),
+            time.time())
+        sw.config.upsert_account.return_value = mock.Mock(label="账号1")
+        sw.window.after.side_effect = lambda _delay, callback: callback()
+        with mock.patch("settings_window.threading.Thread") as thread_cls:
+            thread_cls.return_value.start.side_effect = (
+                lambda: thread_cls.call_args.kwargs["target"]())
+            sw._add_account()
+        sw.config.upsert_account.assert_called_once_with("", "sk-new-key-0001")
+        self.assertEqual(calls, [1])
+        self.assertFalse(hasattr(SettingsWindow, "_next_default_label"))
+
+    def test_main_add_with_empty_label_lets_config_name_it(self):
+        app = object.__new__(TokenHubApp)
+        app.cfg = mock.Mock()
+        app.cfg.accounts = []
+        app.cfg.upsert_account.return_value = mock.Mock(label="账号1")
+        app.refresh_state = RefreshState()
+        app._refresh_event = threading.Event()
+        app.win = mock.Mock()
+        app._update_ui_accounts = mock.Mock()
+        result = app.on_add_account("", "sk-new-key-0001")
+        self.assertEqual(result, (True, ""))
+        app.cfg.upsert_account.assert_called_once_with("", "sk-new-key-0001")
+        self.assertFalse(hasattr(TokenHubApp, "_next_default_label"))
 
 
 class ConfigSavedMainTests(unittest.TestCase):

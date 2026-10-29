@@ -761,7 +761,7 @@ class AccountCallbackTests(unittest.TestCase):
         result = app.on_add_account('', 'sk-demo')
         self.assertEqual(result, (True, ''))
         label_arg = app.cfg.upsert_account.call_args[0][0]
-        self.assertEqual(label_arg, '账号1')  # 空标签 → 默认名
+        self.assertEqual(label_arg, '')  # 空标签交给 Config 生成默认名
         self.assertTrue(app._refresh_event.is_set())  # 成功 → 强制刷新
 
     def test_add_account_blocked_returns_false_and_toast(self):

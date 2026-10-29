@@ -184,6 +184,12 @@ class ConfigTests(unittest.TestCase):
         cfg3 = Config(path=self.path)
         self.assertEqual(len(cfg3.accounts), 0)
 
+    def test_upsert_empty_label_keeps_existing_name(self):
+        cfg = Config(path=self.path)
+        cfg.upsert_account("旧名", "sk-keep-name-0001")
+        cfg.upsert_account("", "sk-keep-name-0001")
+        self.assertEqual(cfg.find_by_key("sk-keep-name-0001").label, "旧名")
+
     def test_mask_key(self):
         # 统一规则：oc_sk_ 长 key（≥16）→ 前8+…+后4；sk- 长 key → 前6+…+后4；短 key → ***
         self.assertEqual(Config.mask_key("sk-AbCXXXXXXXXXXXXXXXXXXwxyz"), "sk-AbC…wxyz")
