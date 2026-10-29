@@ -693,7 +693,9 @@ class TokenHubApp:
             self.win.apply_theme(self.theme.get_colors())
         except Exception as e:
             log_exception("theme", e)
-        self._maybe_refresh_now()
+        # 账号列表立即反映增删/改名，再强制刷新数据（不等 15s 节流/下轮轮询）
+        self._update_ui_accounts()
+        self._force_refresh_now()
 
     def _setup_tray(self):
         try:

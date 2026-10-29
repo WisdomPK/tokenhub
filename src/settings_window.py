@@ -141,7 +141,8 @@ class SettingsWindow:
 
     def _notify_saved(self) -> None:
         """账号/选项落盘后通知外部刷新（未注入回调时无操作）。"""
-        self._notify_saved()
+        if self.on_save is not None:
+            self.on_save()
 
     # ============ 构建 ============
 
@@ -447,20 +448,7 @@ class SettingsWindow:
         entry.select_range(0, 'end')
 
         def confirm():
-            new_label = entry.get().strip()
-            if not new_label:
-                messagebox.showwarning('提示', '标签不能为空', parent=dialog)
-                return
-            try:
-                self.config.upsert_account(new_label, key)  # R3-04：已自落盘
-            except Exception as exc:
-                self._inline_feedback(f'保存失败：{exc}', ok=False)
-                return
-            if self.on_save:
-                self.on_save()
-            dialog.destroy()
-            self._refresh_accounts()
-            self._inline_feedback(f'已改名为「{new_label}」')
+            self._apply_rename(key, entry.get(), dialog)
 
         btn_frame = tk.Frame(frame, bg=self.colors['bg'])
         btn_frame.pack(fill=tk.X, pady=(12, 0))
@@ -470,6 +458,25 @@ class SettingsWindow:
                           font_size=10, padx=16).pack(side=tk.RIGHT, padx=(0, 8))
         dialog.bind('<Escape>', lambda e: dialog.destroy())
         dialog.bind('<Return>', lambda e: confirm())
+
+    def _apply_rename(self, key: str, new_label: str, dialog=None) -> bool:
+        """改名确认：统一走 _notify_saved 通知入口（成功恰一次）。"""
+        new_label = (new_label or '').strip()
+        if not new_label:
+            messagebox.showwarning('提示', '标签不能为空',
+                                   parent=dialog if dialog is not None else self.window)
+            return False
+        try:
+            self.config.upsert_account(new_label, key)  # R3-04：已自落盘
+        except Exception as exc:
+            self._inline_feedback(f'保存失败：{exc}', ok=False)
+            return False
+        self._notify_saved()
+        if dialog is not None:
+            dialog.destroy()
+        self._refresh_accounts()
+        self._inline_feedback(f'已改名为「{new_label}」')
+        return True
 
     def _delete_account(self, key: str) -> None:
         account = self._find_account(key)
