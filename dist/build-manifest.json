@@ -1,0 +1,7 @@
+{
+  "source_commit": "b9a7efd28a53a0c9ec394d7543334d60d98cd808",
+  "python": "3.13.12",
+  "pyinstaller": "6.21.0",
+  "exe_sha256": "2da49ca3fbc98662a6a50455ee3f01d87ca14bd9fefcfdee8598425c53273676",
+  "built_at": "2026-10-29T04:02:04Z"
+}
