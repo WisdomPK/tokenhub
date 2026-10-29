@@ -33,6 +33,20 @@ def _source_commit() -> str | None:
         return None
 
 
+def _source_dirty() -> bool | None:
+    """工作区是否有未提交变更；非 git 仓库/命令不可用时返回 None，不阻断构建。"""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return None
+
+
 def _pyinstaller_version() -> str | None:
     """PyInstaller 版本；元数据不可用时返回 None，不阻断构建。"""
     try:
@@ -53,9 +67,10 @@ def _sha256(path: str) -> str | None:
 
 
 def write_build_manifest(exe: str) -> None:
-    """记录源码提交、Python/PyInstaller 版本与 EXE 摘要（构建成功后调用）。"""
+    """记录源码提交、工作区脏标记、Python/PyInstaller 版本与 EXE 摘要（构建成功后调用）。"""
     manifest = {
         "source_commit": _source_commit(),
+        "source_dirty": _source_dirty(),
         "python": sys.version.split()[0],
         "pyinstaller": _pyinstaller_version(),
         "exe_sha256": _sha256(exe),
