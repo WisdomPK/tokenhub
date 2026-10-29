@@ -28,6 +28,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { createSnapshotService } from './snapshot.js'
 
 // ----------------------------------------------------------------- contract
 
@@ -236,9 +237,14 @@ function credentialWriteError(error) {
  * so one bad key cannot take down the pool.
  * @returns error code plus, on success, the three parsed windows.
  */
-async function fetchUsage(key, baseUrl, timeoutMs) {
+async function fetchUsage(key, baseUrl, timeoutMs, signal) {
   const ctrl = new AbortController()
   const abort = setTimeout(() => ctrl.abort(), timeoutMs)
+  const forwardAbort = () => ctrl.abort()
+  if (signal) {
+    if (signal.aborted) ctrl.abort()
+    else signal.addEventListener('abort', forwardAbort, { once: true })
+  }
   try {
     const res = await fetch(baseUrl, {
       headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
@@ -276,6 +282,7 @@ async function fetchUsage(key, baseUrl, timeoutMs) {
     }
   } finally {
     clearTimeout(abort)
+    if (signal) signal.removeEventListener('abort', forwardAbort)
   }
 }
 
@@ -610,9 +617,8 @@ function createHub(ctx, options) {
   const { baseUrl, refreshMs, timeoutMs, syncAuth, authPath, credentialsPath } = options
   const { explicitNames, autoReleaseLock, wedgedLockMinAgeMs, thresholds, scale } = options
 
-  /** Serialized snapshot handed to the client; never carries a key value. */
-  let cache = { updatedAt: 0, error: null, entries: [] }
-  let refreshing = null
+  /** Created below once the account readers exist; never carries a key value. */
+  let snapshotService = null
 
   /** Resolve one reference. The store answers per call, so this is the value. */
   async function resolveRef(ref) {
@@ -734,20 +740,6 @@ function createHub(ctx, options) {
     return matches[0].name
   }
 
-  /** One snapshot row: the key itself never appears, only its mask. */
-  function rowOf(id, poolName, key, usage, active, inPool) {
-    return {
-      id,
-      name: poolName,
-      masked: maskKey(key),
-      active,
-      inPool,
-      error: usage.error,
-      detail: usage.detail || null,
-      windows: usage.windows || null,
-    }
-  }
-
   /**
    * Validate a user-supplied pool name once, for every entry point. Reserved
    * names are rejected before any credential is touched.
@@ -784,59 +776,78 @@ function createHub(ctx, options) {
   }
 
   /**
-   * Rebuild the cache. Concurrent callers share one in-flight pass, so a poll
-   * and a widget refresh never double-spend the endpoint.
+   * Host-private account state: identity rows plus a fingerprint of the inputs
+   * that decided them. The fingerprint lets the snapshot service refuse a batch
+   * whose account state changed while its requests were in flight.
    */
-  async function refresh() {
-    if (refreshing) return refreshing
-    refreshing = (async () => {
-      try {
-        const pool = await resolvePool()
-        const current = await readCurrent()
-        const declared = await readDeclaredActive()
-        const activeName = selectActiveName(pool, current, declared)
-        const entries = []
+  async function readAccountsState() {
+    const pool = await resolvePool()
+    const current = await readCurrent()
+    const declared = await readDeclaredActive()
+    const activeName = selectActiveName(pool, current, declared)
+    const rows = []
 
-        // The key in force always owns a row, whether or not a pool entry backs
-        // it. It is what the next request uses, and it is the row carrying the
-        // Add affordance — without it, filing the first pool entry would leave
-        // nothing marked in force and no way to add a second. When no pool entry
-        // holds the key, no pool row may claim to be in force.
-        if (current !== null && activeName === null) {
-          const usage = await fetchUsage(current, baseUrl, timeoutMs)
-          entries.push(rowOf(CURRENT_ROW_ID, '', current, usage, true, false))
-        }
-
-        const backed = await Promise.all(
-          pool.map(async (entry) => {
-            const usage = await fetchUsage(entry.key, baseUrl, timeoutMs)
-            return rowOf('pool:' + entry.name, entry.name, entry.key, usage, entry.name === activeName, true)
-          }),
-        )
-        entries.push(...backed)
-        cache = {
-          updatedAt: Date.now(),
-          error: entries.length === 0 ? 'no-keys' : null,
-          entries,
-          scale,
-        }
-      } catch (error) {
-        cache = Object.assign({}, cache, { error: 'internal: ' + String((error && error.message) || error) })
-      }
-    })()
-    try {
-      await refreshing
-    } finally {
-      refreshing = null
+    // The key in force always owns a row, whether or not a pool entry backs it.
+    // It is what the next request uses, and it is the row carrying the Add
+    // affordance. When no pool entry holds the key, no pool row may claim to be
+    // in force.
+    if (current !== null && activeName === null) {
+      rows.push({
+        id: CURRENT_ROW_ID,
+        name: '',
+        key: current,
+        masked: maskKey(current),
+        active: true,
+        inPool: false,
+      })
     }
-    return cache
+    for (const entry of pool) {
+      rows.push({
+        id: 'pool:' + entry.name,
+        name: entry.name,
+        key: entry.key,
+        masked: maskKey(entry.key),
+        active: entry.name === activeName,
+        inPool: true,
+      })
+    }
+    return {
+      rows,
+      fingerprint: JSON.stringify({
+        current,
+        declared,
+        pool: pool.map((entry) => [entry.name, entry.key]),
+      }),
+    }
   }
 
-  /** The snapshot the widget polls: refreshed on demand or when stale. */
-  async function snapshot(force) {
-    if (force || Date.now() - cache.updatedAt > refreshMs) await refresh()
-    return Object.assign({}, cache, { thresholds })
+  /** Fetch one usage reading per unique key, keeping key values host-side. */
+  async function fetchUsages(keys, { signal } = {}) {
+    const results = new Map()
+    for (const key of keys) {
+      results.set(key, await fetchUsage(key, baseUrl, timeoutMs, signal))
+    }
+    return results
   }
+
+  snapshotService = createSnapshotService({
+    readAccounts: readAccountsState,
+    fetchUsages,
+    now: Date.now,
+    refreshMs,
+  })
+
+  /** Force one generation; concurrent callers of the same revision share it. */
+  const refresh = () => snapshotService.snapshot(true)
+
+  /** The snapshot the widget polls, with presentation tunables attached. */
+  async function snapshot(force) {
+    const base = await snapshotService.snapshot(force === true)
+    return Object.assign({}, base, { thresholds, scale })
+  }
+
+  /** Stop polling and prevent a late batch from committing after unload. */
+  const dispose = () => snapshotService.dispose()
 
   /**
    * Move the active account: store the target key under the reference the
@@ -904,7 +915,7 @@ function createHub(ctx, options) {
 
     // The usage refresh is deliberately outside the write queue: a slow endpoint
     // must not hold the next account change.
-    if (outcome.ok) await refresh()
+    if (outcome.ok) snapshotService.invalidate()
     return outcome
   }
 
@@ -961,7 +972,7 @@ function createHub(ctx, options) {
       })
     })
 
-    if (outcome.ok) await refresh()
+    if (outcome.ok) snapshotService.invalidate()
     return outcome
   }
 
@@ -1009,7 +1020,7 @@ function createHub(ctx, options) {
       })
     })
 
-    if (outcome.ok) await refresh()
+    if (outcome.ok) snapshotService.invalidate()
     return outcome
   }
 
@@ -1073,7 +1084,7 @@ function createHub(ctx, options) {
       })
     })
 
-    if (outcome.ok) await refresh()
+    if (outcome.ok) snapshotService.invalidate()
     return outcome
   }
 
@@ -1103,11 +1114,11 @@ function createHub(ctx, options) {
       return succeed({ name: target, message: '已删除账号「' + target + '」' })
     })
 
-    if (outcome.ok) await refresh()
+    if (outcome.ok) snapshotService.invalidate()
     return outcome
   }
 
-  return { refresh, snapshot, switchTo, addAccount, joinPool, renameAccount, removeAccount }
+  return { refresh, snapshot, dispose, switchTo, addAccount, joinPool, renameAccount, removeAccount }
 }
 
 // ------------------------------------------------------------------- plugin
@@ -1122,10 +1133,16 @@ function apply(ctx, config = {}) {
   const options = readConfig(config)
   const hub = createHub(ctx, options)
 
-  hub.refresh()
-  ctx.interval(() => {
+  ctx.effect(() => {
     hub.refresh()
-  }, options.refreshMs)
+    const stop = ctx.interval(() => {
+      hub.refresh()
+    }, options.refreshMs)
+    return () => {
+      if (typeof stop === 'function') stop()
+      hub.dispose()
+    }
+  }, 'dsh-tokenhub: polling')
 
   // The web server exists only in a web composition; a headless profile still
   // gets the polling and switching logic for programmatic callers.
