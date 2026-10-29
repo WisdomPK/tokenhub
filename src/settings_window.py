@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Optional
 
-from api import ApiClient  # Lane A 产出；运行期集成后可用
+from api import ApiClient, usage_validation_error  # Lane A 产出；运行期集成后可用
 
 
 class SettingsWindow:
@@ -42,6 +42,7 @@ class SettingsWindow:
         self.api = api if api is not None else ApiClient()
         self.on_save = on_save
         self.get_current_key = get_current_key
+        self._auth_read_error: Optional[str] = None
         self.window: Optional[tk.Toplevel] = None
         self.show()
 
@@ -141,7 +142,8 @@ class SettingsWindow:
 
     def _notify_saved(self) -> None:
         """账号/选项落盘后通知外部刷新（未注入回调时无操作）。"""
-        self._notify_saved()
+        if self.on_save is not None:
+            self.on_save()
 
     # ============ 构建 ============
 
@@ -277,16 +279,22 @@ class SettingsWindow:
                 2000, lambda: self._feedback_label.configure(text=''))
 
     def _current_key(self) -> Optional[str]:
-        """当前账号密钥：优先回调，其次读 auth.json（main 未传入时兜底）。"""
+        """当前账号密钥：读取异常记录诊断，不伪装成“未配置”。"""
+        self._auth_read_error = None
         if self.get_current_key is not None:
             try:
                 return self.get_current_key()
-            except Exception:
+            except Exception as exc:
+                self._auth_read_error = str(exc) or '认证文件读取失败'
                 return None
         try:
             from auth_store import AuthStore
-            return AuthStore().current_key()
-        except Exception:
+            store = AuthStore()
+            key = store.current_key()
+            self._auth_read_error = store.last_error
+            return key
+        except Exception as exc:
+            self._auth_read_error = str(exc) or '认证文件读取失败'
             return None
 
     def _refresh_accounts(self) -> None:
@@ -295,6 +303,10 @@ class SettingsWindow:
         c = self.colors
         bg, fg, sub = c['bg'], c['fg'], c['sub']
         current_key = self._current_key()
+        if self._auth_read_error:
+            tk.Label(self._accounts_frame, text=self._auth_read_error,
+                     font=(self.FONT, 9), bg=bg, fg=c['warn']).pack(
+                anchor='w', pady=(0, 4))
 
         accounts = list(getattr(self.config, 'accounts', []) or [])
         if not accounts:
@@ -344,21 +356,6 @@ class SettingsWindow:
         self._key_entry.delete(0, 'end')
         self._key_entry.insert(0, text)
 
-    def _next_default_label(self) -> str:
-        accounts = getattr(self.config, 'accounts', []) or []
-        used = set()
-        for a in accounts:
-            lbl = getattr(a, 'label', '') or ''
-            if lbl.startswith('账号'):
-                try:
-                    used.add(int(lbl[2:]))
-                except ValueError:
-                    pass
-        n = 1
-        while n in used:
-            n += 1
-        return f'账号{n}'
-
     def _add_account(self) -> None:
         label = self._label_entry.get().strip()
         key = self._key_entry.get().strip()
@@ -368,8 +365,7 @@ class SettingsWindow:
         if not (key.startswith('sk-') or key.startswith('oc_sk_')):
             messagebox.showwarning('提示', '密钥应以 sk- 或 oc_sk_ 开头', parent=self.window)
             return
-        if not label:
-            label = self._next_default_label()
+        # 空标签交给 Config 统一生成默认名（唯一来源，UI 不自编号）
 
         self._add_btn.configure(state='disabled', text='校验中…')
 
@@ -390,17 +386,8 @@ class SettingsWindow:
 
     @staticmethod
     def _usage_error(usage) -> str:
-        if usage is None:
-            return '接口无返回'
-        for metric_key in ('rolling', 'weekly', 'monthly'):
-            m = getattr(usage, metric_key, None)
-            if m is not None:
-                err = getattr(m, 'error', None)
-                if err:
-                    return f'{metric_key}: {err}'
-                if getattr(m, 'percent', None) is None:
-                    return f'{metric_key}: 数据不完整'
-        return ''
+        """新增校验：至少一个窗口有效才接受（接口数据不可用 ≠ 密钥有效）。"""
+        return usage_validation_error(usage)
 
     def _on_add_done(self, label, key, usage, err) -> None:
         if not self.window or not self.window.winfo_exists():
@@ -411,7 +398,7 @@ class SettingsWindow:
             self._inline_feedback(f'校验失败：{err}', ok=False)
             return
         try:
-            self.config.upsert_account(label, key)  # R3-04：方法内已自落盘
+            saved = self.config.upsert_account(label, key)  # R3-04：方法内已自落盘
         except Exception as exc:
             self._inline_feedback(f'保存失败：{exc}', ok=False)
             return
@@ -419,7 +406,8 @@ class SettingsWindow:
         self._refresh_accounts()
         self._key_entry.delete(0, 'end')
         self._label_entry.delete(0, 'end')
-        self._inline_feedback(f'已添加「{label}」并通过密钥校验')
+        shown = getattr(saved, 'label', '') or label or '新账号'
+        self._inline_feedback(f'已添加「{shown}」并通过密钥校验')
 
     def _rename_account(self, key: str) -> None:
         account = self._find_account(key)
@@ -447,20 +435,7 @@ class SettingsWindow:
         entry.select_range(0, 'end')
 
         def confirm():
-            new_label = entry.get().strip()
-            if not new_label:
-                messagebox.showwarning('提示', '标签不能为空', parent=dialog)
-                return
-            try:
-                self.config.upsert_account(new_label, key)  # R3-04：已自落盘
-            except Exception as exc:
-                self._inline_feedback(f'保存失败：{exc}', ok=False)
-                return
-            if self.on_save:
-                self.on_save()
-            dialog.destroy()
-            self._refresh_accounts()
-            self._inline_feedback(f'已改名为「{new_label}」')
+            self._apply_rename(key, entry.get(), dialog)
 
         btn_frame = tk.Frame(frame, bg=self.colors['bg'])
         btn_frame.pack(fill=tk.X, pady=(12, 0))
@@ -471,13 +446,38 @@ class SettingsWindow:
         dialog.bind('<Escape>', lambda e: dialog.destroy())
         dialog.bind('<Return>', lambda e: confirm())
 
+    def _apply_rename(self, key: str, new_label: str, dialog=None) -> bool:
+        """改名确认：统一走 _notify_saved 通知入口（成功恰一次）。"""
+        new_label = (new_label or '').strip()
+        if not new_label:
+            messagebox.showwarning('提示', '标签不能为空',
+                                   parent=dialog if dialog is not None else self.window)
+            return False
+        try:
+            self.config.upsert_account(new_label, key)  # R3-04：已自落盘
+        except Exception as exc:
+            self._inline_feedback(f'保存失败：{exc}', ok=False)
+            return False
+        self._notify_saved()
+        if dialog is not None:
+            dialog.destroy()
+        self._refresh_accounts()
+        self._inline_feedback(f'已改名为「{new_label}」')
+        return True
+
     def _delete_account(self, key: str) -> None:
         account = self._find_account(key)
         if account is None:
             return
         label = getattr(account, 'label', '') or '未命名'
-
-        if key == self._current_key():
+        current_key = self._current_key()
+        if self._auth_read_error:
+            messagebox.showwarning(
+                '无法确认当前账号',
+                f'认证文件读取失败，暂不能删除：\n{self._auth_read_error}',
+                parent=self.window)
+            return
+        if key == current_key:
             messagebox.showwarning('无法删除',
                                    f'「{label}」是当前账号，不可删除。\n请先切换到其他账号，再回来删除。',
                                    parent=self.window)

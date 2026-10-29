@@ -184,6 +184,12 @@ class ConfigTests(unittest.TestCase):
         cfg3 = Config(path=self.path)
         self.assertEqual(len(cfg3.accounts), 0)
 
+    def test_upsert_empty_label_keeps_existing_name(self):
+        cfg = Config(path=self.path)
+        cfg.upsert_account("旧名", "sk-keep-name-0001")
+        cfg.upsert_account("", "sk-keep-name-0001")
+        self.assertEqual(cfg.find_by_key("sk-keep-name-0001").label, "旧名")
+
     def test_mask_key(self):
         # 统一规则：oc_sk_ 长 key（≥16）→ 前8+…+后4；sk- 长 key → 前6+…+后4；短 key → ***
         self.assertEqual(Config.mask_key("sk-AbCXXXXXXXXXXXXXXXXXXwxyz"), "sk-AbC…wxyz")
@@ -507,6 +513,78 @@ class AuthStoreTests(unittest.TestCase):
             store = AuthStore()
             self.assertEqual(store.path(), str(self.home / ".local/share/opencode/auth.json"))
 
+    # ---- W8：显式路径是唯一目标，不回退/触碰默认路径 ----
+
+    def test_explicit_missing_path_does_not_fall_back_to_default(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        explicit = Path(self.tmp.name) / "explicit" / "auth.json"
+        with self._env():
+            store = AuthStore(str(explicit))
+            self.assertEqual(store.path(), str(explicit))
+            self.assertIsNone(store.current_key())
+            ok, msg, status = store.switch_to("sk-explicit-key-9999")
+            self.assertTrue(ok, msg)
+            self.assertEqual(status, "ok")
+            self.assertTrue(explicit.exists())
+            self.assertEqual(json.loads(explicit.read_text(encoding="utf-8"))
+                             ["opencode-go"]["key"], "sk-explicit-key-9999")
+            self.assertEqual(default.read_bytes(), default_bytes)
+            self.assertEqual(store.current_key(), "sk-explicit-key-9999")
+
+    def test_explicit_corrupt_path_does_not_touch_default(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        explicit = Path(self.tmp.name) / "broken-auth.json"
+        explicit.write_text("{not-json", encoding="utf-8")
+        explicit_bytes = explicit.read_bytes()
+        with self._env():
+            store = AuthStore(str(explicit))
+            self.assertEqual(store.path(), str(explicit))
+            ok, msg, status = store.switch_to("sk-explicit-key-9999")
+            self.assertFalse(ok)
+            self.assertEqual(status, "unaffected")
+            self.assertIn("解析失败", msg)
+            self.assertEqual(explicit.read_bytes(), explicit_bytes)
+            self.assertEqual(default.read_bytes(), default_bytes)
+
+    def test_switch_creates_missing_parent_directory(self):
+        target = Path(self.tmp.name) / "nested" / "deep" / "auth.json"
+        with self._env():
+            store = AuthStore(str(target))
+            ok, msg, status = store.switch_to("sk-new-key-9999abcd")
+            self.assertTrue(ok, msg)
+            self.assertEqual(status, "ok")
+            self.assertTrue(target.exists())
+            self.assertEqual(store.current_key(), "sk-new-key-9999abcd")
+
+    def test_restore_message_matches_file_after_readback_failure(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p, go_key="sk-old-key-0004")
+        original = p.read_bytes()
+        with self._env():
+            store = AuthStore()
+            real_replace = os.replace
+            state = {"n": 0}
+
+            def fake_replace(src, dst):
+                state["n"] += 1
+                real_replace(src, dst)
+                if state["n"] == 1:
+                    with open(dst, "w", encoding="utf-8") as f:
+                        json.dump({"opencode-go": {"type": "api",
+                                                   "key": "sk-TAMPERED"}}, f)
+
+            with mock.patch("auth_store.os.replace", side_effect=fake_replace):
+                ok, msg, status = store.switch_to("sk-new-key-9999abcd")
+            self.assertFalse(ok)
+            self.assertEqual(status, "restored")
+            self.assertEqual(msg, "读回校验失败，已恢复原账号")
+            self.assertEqual(p.read_bytes(), original)
+            self.assertEqual(store.current_key(), "sk-old-key-0004")
+
     def test_auth_switch_atomic_and_readback(self):
         p = self.home / ".local/share/opencode/auth.json"
         self._write_auth(p, go_key="sk-old-key-0004")
@@ -661,6 +739,68 @@ class AuthStoreTests(unittest.TestCase):
                 self.assertEqual(status, "ok")
             baks = sorted(p.parent.glob("auth.json.tokenhub.bak-*"))
             self.assertEqual(len(baks), 5)
+
+    def test_auth_backup_failure_logs_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p)
+        with self._env():
+            store = AuthStore()
+            with mock.patch("auth_store.shutil.copy2", side_effect=OSError("denied")), \
+                    mock.patch("auth_store.log_exception") as log:
+                self.assertIsNone(store.backup())
+            log.assert_called_once()
+
+    def test_auth_temp_cleanup_failure_logs_diagnostic(self):
+        with mock.patch("auth_store.os.path.exists", return_value=True), \
+                mock.patch("auth_store.os.remove", side_effect=OSError("denied")), \
+                mock.patch("auth_store.log_exception") as log:
+            AuthStore._cleanup_tmp("tokenhub.tmp")
+        log.assert_called_once()
+
+    def test_auth_current_key_permission_error_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p)
+        with self._env(), mock.patch(
+                "builtins.open", side_effect=PermissionError("denied")):
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNotNone(store.last_error)
+            self.assertIn("认证文件读取失败", store.last_error)
+        with self._env():
+            store = AuthStore()
+            self.assertEqual(store.current_key(), "sk-current-key-0001")
+            self.assertIsNone(store.last_error)
+
+    def test_auth_current_key_corrupt_file_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text("{not-json", encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNotNone(store.last_error)
+            self.assertIn("认证文件读取失败", store.last_error)
+
+    def test_auth_current_key_missing_file_or_field_is_not_error(self):
+        missing = Path(self.tmp.name) / "missing-auth.json"
+        with self._env():
+            store = AuthStore(str(missing))
+            self.assertIsNone(store.current_key())
+            self.assertIsNone(store.last_error)
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text(json.dumps({"openai": {"type": "api", "key": "sk-x"}}),
+                     encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNone(store.last_error)
+
+    def test_auth_current_key_malformed_field_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text(json.dumps({"opencode-go": "not-an-object"}), encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIn("字段格式错误", store.last_error)
 
     def test_auth_current_key_missing_file(self):
         with self._env():

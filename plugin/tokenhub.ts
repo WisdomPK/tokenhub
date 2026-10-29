@@ -54,10 +54,19 @@ const RESTORE_TMP_TAG = ".tokenhub.restoretmp-";
 type PluginInput = {
   serverUrl?: URL | string;
   directory?: string;
+  /** 显式配置的 auth.json 路径；存在时优先于环境变量与自动发现。 */
+  authPath?: string;
   [key: string]: unknown;
 };
 
 type SwitchResult = { ok: boolean; method: "api" | "file"; error?: string };
+
+/** 宿主认证 API 的结果分类：只有 timeout 需要核对文件，只有 unreachable 允许直写。 */
+type ApiSwitchOutcome =
+  | { kind: "ok" }
+  | { kind: "timeout" }
+  | { kind: "unreachable" }
+  | { kind: "rejected"; detail: string };
 
 /** 异常文本化（与 Python 端 str(exc) 等价）。 */
 function errText(e: unknown): string {
@@ -126,13 +135,16 @@ function readJsonFile(path: string): unknown {
 
 /**
  * auth.json 路径解析（spec §3.2）：
- * OPENCODE_AUTH_PATH(测试) → XDG_DATA_HOME → ~/.local/share → ~/.opencode；
- * 优先选择"存在且包含 opencode-go 字段"的文件；都不存在则用第 1 项。
+ *   显式配置 override → OPENCODE_AUTH_PATH(测试) → 自动发现
+ *   （XDG_DATA_HOME → ~/.local/share → ~/.opencode）。
+ * 显式指定即唯一目标：override / 环境路径即使不存在或损坏也不回退到其他候选；
+ * 仅在两者都未指定时才按“存在且包含 opencode-go 字段 → 首个存在 → 首项”自动发现。
  */
-function resolveAuthPath(): string {
-  const candidates: string[] = [];
+function resolveOpencodeAuthPath(override?: string | null): string {
+  if (typeof override === "string" && override.length > 0) return override;
   const envPath = process.env.OPENCODE_AUTH_PATH;
-  if (envPath) candidates.push(envPath);
+  if (envPath) return envPath;
+  const candidates: string[] = [];
   const xdg = process.env.XDG_DATA_HOME;
   if (xdg) candidates.push(join(xdg, "opencode", "auth.json"));
   const home = homedir();
@@ -236,12 +248,26 @@ function tryRestoreAuthFile(
   return { ok: false, hint: "恢复失败，状态待确认" };
 }
 
+/** 读取 auth.json 中 opencode-go.key；缺失/损坏返回 null（供超时核对，不写文件）。 */
+function readAuthKey(target: string): string | null {
+  try {
+    const data = readJsonFile(target);
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    const entry = (data as Record<string, unknown>)[AUTH_FIELD];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const key = (entry as Record<string, unknown>).key;
+    return typeof key === "string" && key.length > 0 ? key : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 直写 auth.json（spec §3.2）：备份 + 临时文件 + rename 原子替换 + 读回校验 + 失败回滚。
- * 仅修改 opencode-go 字段，保留其他键。
+ * 仅修改 opencode-go 字段，保留其他键。authPathOverride 显式指定时只写该目标。
  */
-function writeAuthFile(key: string): SwitchResult {
-  const target = resolveAuthPath();
+function writeAuthFile(key: string, authPathOverride?: string): SwitchResult {
+  const target = resolveOpencodeAuthPath(authPathOverride);
   const dir = dirname(target);
   let data: Record<string, unknown> = {};
   let existed = false;
@@ -327,13 +353,32 @@ function writeAuthFile(key: string): SwitchResult {
   return { ok: true, method: "file" };
 }
 
+/** fetch 超时（AbortSignal.timeout）在 Node 中表现为 TimeoutError/AbortError。 */
+function isTimeoutError(e: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = e;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const name = (current as { name?: unknown }).name;
+    if (name === "TimeoutError" || name === "AbortError") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /**
  * 官方切换通道：PUT {serverUrl}auth/opencode-go，payload {type:"api",key}（F5/C2 实证）。
  * Basic Auth 取 env OPENCODE_SERVER_USERNAME/OPENCODE_SERVER_PASSWORD（无密码则不带 header）。
- * 3s 超时；任何非 2xx / 网络错误均返回 false（调用方降级直写文件）。
+ * 3s 超时。调用方必须区分三类结果：
+ *   - ok：宿主已确认写入；
+ *   - timeout：请求可能已被宿主执行，先核对 auth 文件，不能盲目直写；
+ *   - unreachable / rejected：未发生写入，才允许降级直写文件。
  */
-async function apiSwitch(serverUrl: URL | string | undefined, key: string): Promise<boolean> {
-  if (!serverUrl) return false;
+async function apiSwitch(
+  serverUrl: URL | string | undefined,
+  key: string,
+): Promise<ApiSwitchOutcome> {
+  if (!serverUrl) return { kind: "unreachable" };
   try {
     const base = new URL(serverUrl.toString());
     base.pathname = "/";
@@ -352,9 +397,11 @@ async function apiSwitch(serverUrl: URL | string | undefined, key: string): Prom
       body: JSON.stringify({ type: "api", key }),
       signal: AbortSignal.timeout(3000),
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) return { kind: "ok" };
+    return { kind: "rejected", detail: `HTTP ${res.status}` };
+  } catch (e) {
+    if (isTimeoutError(e)) return { kind: "timeout" };
+    return { kind: "unreachable" };
   }
 }
 
@@ -393,7 +440,12 @@ function collectBody(
   });
 }
 
-/** 校验密钥（sk- 或 oc_sk_ 开头）→ API 优先 → 文件兜底；状态码与文案保持不变。 */
+/**
+ * 校验密钥（sk- 或 oc_sk_ 开头）→ API 优先 → 文件兜底。
+ * timeout 与 unreachable 分开处理：timeout 只核对目标 auth 文件，
+ * 确认目标 key 已写入 → 成功；无法确认 → uncertain，绝不再写一次文件。
+ * unreachable / rejected（未发生写入）才走文件直写。
+ */
 async function respondSwitch(
   res: ServerResponse,
   input: PluginInput,
@@ -411,18 +463,42 @@ async function respondSwitch(
     sendJson(res, 400, { ok: false, error: "key 必须以 sk- 或 oc_sk_ 开头" });
     return;
   }
-  if (await apiSwitch(input.serverUrl, key)) {
+  const outcome = await apiSwitch(input.serverUrl, key);
+  if (outcome.kind === "ok") {
     sendJson(res, 200, { ok: true, method: "api" });
     return;
   }
-  const result = writeAuthFile(key);
-  sendJson(
-    res,
-    200,
-    result.ok
-      ? { ok: true, method: "file" }
-      : { ok: false, method: "file", error: result.error ?? "未知错误" },
-  );
+  if (outcome.kind === "timeout") {
+    const target = resolveOpencodeAuthPath(input.authPath);
+    if (readAuthKey(target) === key) {
+      // 宿主可能已写入：文件已含目标 key，不重复写文件
+      sendJson(res, 200, { ok: true, method: "api", verified: "auth-file" });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: false,
+      method: "api",
+      uncertain: true,
+      status: "timeout_uncertain",
+      error: "控制接口超时，无法确认切换结果；未再次写入认证文件",
+    });
+    return;
+  }
+  const result = writeAuthFile(key, input.authPath);
+  if (result.ok) {
+    sendJson(res, 200, { ok: true, method: "file" });
+    return;
+  }
+  const fileError = result.error ?? "未知错误";
+  sendJson(res, 200, {
+    ok: false,
+    method: "file",
+    error:
+      outcome.kind === "rejected"
+        ? `宿主接口拒绝（${outcome.detail}）；文件降级失败: ${fileError}`
+        : fileError,
+    ...(outcome.kind === "rejected" ? { status: "host_rejected" } : {}),
+  });
 }
 
 /** POST /switch（token 已在 server 层校验）：读体 → 校验 → 切换。 */
@@ -519,6 +595,7 @@ export const TokenHub = async (input: PluginInput): Promise<Record<string, unkno
       // TH-06/TH-03：暴露辅助函数供冒烟测试断言（不新增命名导出，
       // 保持 legacy 加载器"仅一个命名导出"的约束）
       _tokenhubResolveExe: resolveExePath,
+      _tokenhubResolveAuthPath: resolveOpencodeAuthPath,
       _tokenhubRestoreAuthFile: tryRestoreAuthFile,
       dispose: () => {
         try {
