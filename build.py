@@ -34,7 +34,11 @@ def _source_commit() -> str | None:
 
 
 def _source_dirty() -> bool | None:
-    """工作区是否有未提交变更；非 git 仓库/命令不可用时返回 None，不阻断构建。"""
+    """源码工作区是否有未提交变更；忽略构建产物（dist/、build/、TokenHub.spec）。
+
+    构建过程本身会改写 dist/，若把它计入脏标记，manifest 永远为 dirty。
+    非 git 仓库/命令不可用时返回 None，不阻断构建。
+    """
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -42,9 +46,18 @@ def _source_dirty() -> bool | None:
             text=True,
             check=True,
         )
-        return bool(result.stdout.strip())
     except Exception:
         return None
+    for line in result.stdout.splitlines():
+        path = line[3:].strip() if len(line) > 3 else ""
+        if not path:
+            continue
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if path.startswith(("dist/", "build/")) or path == "TokenHub.spec":
+            continue
+        return True
+    return False
 
 
 def _pyinstaller_version() -> str | None:
