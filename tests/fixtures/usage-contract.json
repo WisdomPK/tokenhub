@@ -2,45 +2,183 @@
   "version": 1,
   "note": "Synthetic usage parsing contract shared by the Python desktop parser and the dsh host parser. No real keys or account data. Do not edit in a task lane; the orchestrator owns this file.",
   "percent": [
-    {"id": "zero", "input": 0, "valid": true, "expected": 0},
-    {"id": "decimal", "input": 59.6, "valid": true, "expected": 59.6},
-    {"id": "warn-threshold", "input": 60, "valid": true, "expected": 60},
-    {"id": "error-threshold", "input": 85, "valid": true, "expected": 85},
-    {"id": "full", "input": 100, "valid": true, "expected": 100},
-    {"id": "over-100", "input": 120, "valid": true, "expected": 120},
-    {"id": "numeric-string", "input": "42.5", "valid": true, "expected": 42.5},
-    {"id": "integer-string", "input": "7", "valid": true, "expected": 7},
-    {"id": "null", "input": null, "valid": false, "expected": null},
-    {"id": "empty-string", "input": "", "valid": false, "expected": null},
-    {"id": "bool-true", "input": true, "valid": false, "expected": null},
-    {"id": "bool-false", "input": false, "valid": false, "expected": null},
-    {"id": "negative", "input": -1, "valid": false, "expected": null},
-    {"id": "non-numeric-string", "input": "12abc", "valid": false, "expected": null},
-    {"id": "array", "input": [10], "valid": false, "expected": null},
-    {"id": "object", "input": {"value": 10}, "valid": false, "expected": null}
+    {
+      "id": "zero",
+      "input": 0,
+      "valid": true,
+      "expected": 0
+    },
+    {
+      "id": "decimal",
+      "input": 59.6,
+      "valid": true,
+      "expected": 59.6
+    },
+    {
+      "id": "warn-threshold",
+      "input": 60,
+      "valid": true,
+      "expected": 60
+    },
+    {
+      "id": "error-threshold",
+      "input": 85,
+      "valid": true,
+      "expected": 85
+    },
+    {
+      "id": "full",
+      "input": 100,
+      "valid": true,
+      "expected": 100
+    },
+    {
+      "id": "over-100",
+      "input": 120,
+      "valid": true,
+      "expected": 120
+    },
+    {
+      "id": "numeric-string",
+      "input": "42.5",
+      "valid": true,
+      "expected": 42.5
+    },
+    {
+      "id": "integer-string",
+      "input": "7",
+      "valid": true,
+      "expected": 7
+    },
+    {
+      "id": "null",
+      "input": null,
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "empty-string",
+      "input": "",
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "bool-true",
+      "input": true,
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "bool-false",
+      "input": false,
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "negative",
+      "input": -1,
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "non-numeric-string",
+      "input": "12abc",
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "array",
+      "input": [
+        10
+      ],
+      "valid": false,
+      "expected": null
+    },
+    {
+      "id": "object",
+      "input": {
+        "value": 10
+      },
+      "valid": false,
+      "expected": null
+    }
   ],
   "resetsAt": [
-    {"id": "utc", "input": "2026-10-29T12:00:00Z", "valid": true},
-    {"id": "offset", "input": "2026-10-29T20:00:00+08:00", "valid": true},
-    {"id": "naive-treated-as-utc", "input": "2026-10-29 12:00:00", "valid": true},
-    {"id": "empty", "input": "", "valid": false},
-    {"id": "garbage", "input": "not-a-time", "valid": false}
+    {
+      "id": "utc",
+      "input": "2026-10-29T12:00:00Z",
+      "valid": true
+    },
+    {
+      "id": "offset",
+      "input": "2026-10-29T20:00:00+08:00",
+      "valid": true
+    },
+    {
+      "id": "naive-treated-as-utc",
+      "input": "2026-10-29 12:00:00",
+      "valid": true
+    },
+    {
+      "id": "empty",
+      "input": "",
+      "valid": false
+    },
+    {
+      "id": "garbage",
+      "input": "not-a-time",
+      "valid": false
+    }
   ],
   "responses": {
     "partial": {
-      "rolling": {"percent": 12.5},
-      "weekly": {"percent": null},
-      "monthly": {"percent": "7"}
+      "rolling": {
+        "percent": 12.5
+      },
+      "weekly": {
+        "percent": null
+      },
+      "monthly": {
+        "percent": "7"
+      }
     },
     "all-missing": {
-      "rolling": {"percent": null},
+      "rolling": {
+        "percent": null
+      },
       "weekly": {},
-      "monthly": {"percent": ""}
+      "monthly": {
+        "percent": ""
+      }
     },
     "bad-time": {
-      "rolling": {"percent": 12.5, "resetsAt": "not-a-time"},
-      "weekly": {"percent": 40, "resetsAt": ""},
-      "monthly": {"percent": 70, "resets_at": "2026-11-29T12:00:00Z"}
+      "rolling": {
+        "percent": 12.5,
+        "resetsAt": "not-a-time"
+      },
+      "weekly": {
+        "percent": 40,
+        "resetsAt": ""
+      },
+      "monthly": {
+        "percent": 70,
+        "resets_at": "2026-11-29T12:00:00Z"
+      }
+    },
+    "resetsAt-primary-invalid": {
+      "rolling": {
+        "percent": 10,
+        "resetsAt": "bad-time",
+        "resets_at": "2030-01-01T12:00:00Z"
+      },
+      "weekly": {
+        "percent": 20,
+        "resetsAt": "2030-01-02T12:00:00Z",
+        "resets_at": "bad-time"
+      },
+      "monthly": {
+        "percent": 30
+      }
     }
   }
 }
