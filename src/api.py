@@ -108,9 +108,11 @@ class ApiClient:
         percent = ApiClient._parse_percent(item.get("percent"))
         status = str(item.get("status") or "ok")
         resets_at = None
+        # 优先 resetsAt；primary 不可解析时才回退有效 legacy resets_at
         for field in ("resetsAt", "resets_at"):
             value = item.get(field)
-            if isinstance(value, str) and value:
+            if (isinstance(value, str) and value
+                    and remaining_seconds(value) is not None):
                 resets_at = value
                 break
         return UsageMetric(status, percent, resets_at)

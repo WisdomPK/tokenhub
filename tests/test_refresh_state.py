@@ -250,6 +250,73 @@ class MainRefreshTests(unittest.TestCase):
         self.assertIsNone(app.refresh_state.account("k"))
         app.win.update_accounts.assert_not_called()
 
+    def test_refresh_captures_revision_before_keys(self):
+        """R4：捕获 revision 后、生成 keys 前被 invalidate，旧批次必须被拒绝。"""
+        app = self._app()
+        app.api = mock.Mock()
+        app.api.fetch_all.return_value = {"k": _usage("k")}
+
+        def invalidate_then_keys():
+            app.refresh_state.invalidate()
+            return ["k"]
+
+        app._all_keys = mock.Mock(side_effect=invalidate_then_keys)
+        app._refresh_once()
+        _kind, payload = app._result_queue.get_nowait()
+        revision, usages, attempted_at = payload
+        self.assertEqual(revision, 0)  # 旧代，而不是 invalidate 后的新代
+        self.assertFalse(app.refresh_state.apply(revision, usages, attempted_at))
+
+        # 下一次刷新捕获新代，可正常接纳
+        app._all_keys = mock.Mock(return_value=["k"])
+        app._refresh_once()
+        _kind, payload = app._result_queue.get_nowait()
+        revision, usages, attempted_at = payload
+        self.assertEqual(revision, app.refresh_state.revision)
+        self.assertTrue(app.refresh_state.apply(revision, usages, attempted_at))
+
+    def test_empty_refresh_uses_revision_captured_before_keys(self):
+        app = self._app()
+
+        def invalidate_then_empty():
+            app.refresh_state.invalidate()
+            return []
+
+        app._all_keys = mock.Mock(side_effect=invalidate_then_empty)
+        app._refresh_once()
+        _kind, payload = app._result_queue.get_nowait()
+        revision, usages, attempted_at = payload
+        self.assertEqual(revision, 0)
+        self.assertEqual(usages, {})
+        self.assertFalse(app.refresh_state.apply(revision, usages, attempted_at))
+
+    def test_poll_auth_retries_same_mtime_after_read_error(self):
+        """R1：读取失败后不得因 mtime 未变而永久短路；5s 后重试并恢复。"""
+        app = self._app()
+        app.store = mock.Mock()
+        app.store.mtime.return_value = 123.0
+        values = [None, "key-a"]
+
+        def read_key():
+            key = values.pop(0)
+            app.store.last_error = (
+                "认证文件读取失败（denied）" if key is None else None)
+            return key
+
+        app.store.current_key.side_effect = read_key
+        app._last_mtime = 122.0
+        app._last_auth_check = 0.0
+        app._poll_auth()
+        self.assertEqual(app._auth_read_error, "认证文件读取失败（denied）")
+        self.assertEqual(app._last_mtime, 122.0)  # 失败不推进 mtime
+
+        app._last_auth_check = 0.0  # 已过 AUTH_POLL_SECONDS，mtime 仍为 123
+        app._poll_auth()
+        self.assertEqual(app._current_key, "key-a")
+        self.assertIsNone(app._auth_read_error)
+        self.assertEqual(app._last_mtime, 123.0)
+        self.assertIsNone(app._sticky_reason)
+
     def test_all_accounts_failed_sets_global_failure(self):
         app = self._app()
         app.refresh_state.invalidate()

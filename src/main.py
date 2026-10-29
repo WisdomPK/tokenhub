@@ -353,14 +353,14 @@ class TokenHubApp:
         self._refresh_thread.start()
 
     def _refresh_once(self):
+        # 先捕获代次再读取账号：避免两次读取之间 invalidate 后旧 keys 被标成新代
+        revision = self.refresh_state.revision
         keys = self._all_keys()
         if not keys:
             # 无账号也要投递空结果：主线程据此清除旧视图/刷新失败 sticky
-            self._result_queue.put(
-                ("usage", (self.refresh_state.revision, {}, time.time())))
+            self._result_queue.put(("usage", (revision, {}, time.time())))
             return
         log_refresh_triggered()
-        revision = self.refresh_state.revision
         try:
             usages = self.api.fetch_all(keys)
         except Exception as e:
@@ -484,14 +484,18 @@ class TokenHubApp:
             return
         self._last_auth_check = now
         mtime = self.store.mtime()
-        if mtime == self._last_mtime:
+        had_auth_error = getattr(self, "_auth_read_error", None) is not None
+        mtime_changed = mtime != self._last_mtime
+        if not had_auth_error and not mtime_changed:
             return
-        self._last_mtime = mtime
-        if not self._switching_inflight:
+        if mtime_changed and not self._switching_inflight:
             # 外部写入 auth 文件：无法推断运行时实际账号，只能保守标注未确认
             self._auth_external_changed = True
             self._switch_pending_restart = False
         self._reload_current_state()
+        if getattr(self, "_auth_read_error", None) is None:
+            # 只有读取成功才推进 mtime；失败时保持旧值以允许下一轮重试
+            self._last_mtime = mtime
 
     def _reload_current_state(self):
         key = self.store.current_key()
