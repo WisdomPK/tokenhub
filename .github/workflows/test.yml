@@ -42,10 +42,11 @@ jobs:
             Write-Output "dsh-tokenhub/package.json not found; skipping dsh tests"
           }
 
+      # dsh 分支已提交 package-lock.json，用 npm ci 保证可复现安装
       - name: Install dsh test dependencies
         if: steps.dsh.outputs.present == 'true'
         working-directory: dsh-tokenhub
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: dsh tests
         if: steps.dsh.outputs.present == 'true'
