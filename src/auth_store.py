@@ -137,6 +137,12 @@ class AuthStore:
         if existed and backup_path is None:
             return (False, "备份 auth.json 失败，未写入", "unaffected")
         data["opencode-go"] = {"type": "api", "key": key}
+        parent = os.path.dirname(path)
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as e:
+                return (False, f"认证文件目录不可创建，未写入（{e}）", "unaffected")
         tmp_path = f"{path}.tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:

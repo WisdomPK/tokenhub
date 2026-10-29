@@ -507,6 +507,78 @@ class AuthStoreTests(unittest.TestCase):
             store = AuthStore()
             self.assertEqual(store.path(), str(self.home / ".local/share/opencode/auth.json"))
 
+    # ---- W8：显式路径是唯一目标，不回退/触碰默认路径 ----
+
+    def test_explicit_missing_path_does_not_fall_back_to_default(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        explicit = Path(self.tmp.name) / "explicit" / "auth.json"
+        with self._env():
+            store = AuthStore(str(explicit))
+            self.assertEqual(store.path(), str(explicit))
+            self.assertIsNone(store.current_key())
+            ok, msg, status = store.switch_to("sk-explicit-key-9999")
+            self.assertTrue(ok, msg)
+            self.assertEqual(status, "ok")
+            self.assertTrue(explicit.exists())
+            self.assertEqual(json.loads(explicit.read_text(encoding="utf-8"))
+                             ["opencode-go"]["key"], "sk-explicit-key-9999")
+            self.assertEqual(default.read_bytes(), default_bytes)
+            self.assertEqual(store.current_key(), "sk-explicit-key-9999")
+
+    def test_explicit_corrupt_path_does_not_touch_default(self):
+        default = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(default, go_key="sk-default-key-0001")
+        default_bytes = default.read_bytes()
+        explicit = Path(self.tmp.name) / "broken-auth.json"
+        explicit.write_text("{not-json", encoding="utf-8")
+        explicit_bytes = explicit.read_bytes()
+        with self._env():
+            store = AuthStore(str(explicit))
+            self.assertEqual(store.path(), str(explicit))
+            ok, msg, status = store.switch_to("sk-explicit-key-9999")
+            self.assertFalse(ok)
+            self.assertEqual(status, "unaffected")
+            self.assertIn("解析失败", msg)
+            self.assertEqual(explicit.read_bytes(), explicit_bytes)
+            self.assertEqual(default.read_bytes(), default_bytes)
+
+    def test_switch_creates_missing_parent_directory(self):
+        target = Path(self.tmp.name) / "nested" / "deep" / "auth.json"
+        with self._env():
+            store = AuthStore(str(target))
+            ok, msg, status = store.switch_to("sk-new-key-9999abcd")
+            self.assertTrue(ok, msg)
+            self.assertEqual(status, "ok")
+            self.assertTrue(target.exists())
+            self.assertEqual(store.current_key(), "sk-new-key-9999abcd")
+
+    def test_restore_message_matches_file_after_readback_failure(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p, go_key="sk-old-key-0004")
+        original = p.read_bytes()
+        with self._env():
+            store = AuthStore()
+            real_replace = os.replace
+            state = {"n": 0}
+
+            def fake_replace(src, dst):
+                state["n"] += 1
+                real_replace(src, dst)
+                if state["n"] == 1:
+                    with open(dst, "w", encoding="utf-8") as f:
+                        json.dump({"opencode-go": {"type": "api",
+                                                   "key": "sk-TAMPERED"}}, f)
+
+            with mock.patch("auth_store.os.replace", side_effect=fake_replace):
+                ok, msg, status = store.switch_to("sk-new-key-9999abcd")
+            self.assertFalse(ok)
+            self.assertEqual(status, "restored")
+            self.assertEqual(msg, "读回校验失败，已恢复原账号")
+            self.assertEqual(p.read_bytes(), original)
+            self.assertEqual(store.current_key(), "sk-old-key-0004")
+
     def test_auth_switch_atomic_and_readback(self):
         p = self.home / ".local/share/opencode/auth.json"
         self._write_auth(p, go_key="sk-old-key-0004")
