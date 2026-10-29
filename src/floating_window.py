@@ -663,8 +663,10 @@ class FloatingWindow:
                 except tk.TclError:
                     pass  # 面板已销毁等 Tcl 预期错误：静默
                 except Exception as exc:
+                    key = blk.get('key') or ''
+                    masked = Config.mask_key(key) if key else '?'
                     log_exception(
-                        f"tick 指标块 {blk.get('key', '?')}/{blk.get('metric', '?')}", exc)
+                        f"tick 指标块 {masked}/{blk.get('metric', '?')}", exc)
             try:
                 due_keys = self._collect_due_keys()
             except tk.TclError:

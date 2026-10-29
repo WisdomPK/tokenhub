@@ -15,9 +15,11 @@
 
 1. 确认已构建：项目根运行 `python build.py`，产物为 `dist\TokenHub.exe` 与 `dist\build-manifest.json`。
    （**本仓库已附带构建好的 `dist\TokenHub.exe`，可跳过本步直接执行第 2 步**。）
-   构建清单记录当前源码提交（`source_commit`）、Python/PyInstaller 版本、EXE 的 SHA-256
-   （`exe_sha256`）与 UTC 构建时间（`built_at`），可用于核对 EXE 与源码的对应关系；
-   非 git 仓库或版本信息不可用时相应字段为 `null`，不影响构建。
+   构建清单记录当前源码提交（`source_commit`）、构建时工作区是否有未提交改动（`source_dirty`：
+   有改动为 `true`、干净为 `false`、git 不可用为 `null`）、Python/PyInstaller 版本、EXE 的
+   SHA-256（`exe_sha256`）与 UTC 构建时间（`built_at`），可用于核对 EXE 与源码的对应关系；
+   `source_dirty` 为 `true` 时产物包含未提交改动，`source_commit` 不能完整代表构建源码。
+   非 git 仓库、命令失败或版本信息不可用时相应字段为 `null`，不影响构建。
 2. 运行安装脚本：
 
    ```
@@ -59,7 +61,7 @@
 
 - 额度数据：每次刷新（默认 60 秒）向 `https://opencode.ai/zen/go/v1/usage` 发送带 `Authorization: Bearer <key>` 的请求，解析 rolling（5小时）/ weekly（本周）/ monthly（本月）三项百分比与重置时间；单账号失败不影响其他账号。解析层区分“0”与“缺失”：null、空字符串、布尔值等不可用值不会被当成 0%；失败不会推进成功时间。
 - 当前账号：以 opencode 的 `auth.json`（默认 `~/.local/share/opencode/auth.json`）中的配置为准。启动或检测到文件变化时，若当前密钥不在账号池中则自动加入。程序默认只声明「已配置」，不把文件变化推断为运行时已生效。
-- 切换：优先调用插件提供的本机控制接口（127.0.0.1，随机端口 + 令牌）；接口超时先核对目标 `auth.json` 是否已含目标密钥——能确认才报成功，无法确认则返回“待确认”且不重复写文件；接口不可达时才直接写 `auth.json`（备份 + 原子替换 + 读回校验 + 失败回滚，仅修改 opencode-go 字段）。**生效边界（实测）**：opencode 进程内会缓存已构建的模型客户端（缓存键不含凭据），auth 变更不会使缓存失效——切换仅更新认证文件，**需重启 opencode 后生效**，运行中的进程继续使用旧账号。
+- 切换：优先调用插件提供的本机控制接口（127.0.0.1，随机端口 + 令牌）；接口超时先核对目标 `auth.json` 是否已含目标密钥——能确认才报成功，无法确认则返回“待确认”且不重复写文件；**仅接口不可达时才直接写 `auth.json`**（备份 + 原子替换 + 读回校验 + 失败回滚，仅修改 opencode-go 字段）；宿主接口返回非 2xx 拒绝时明确报失败，**不写认证文件**。**生效边界（实测）**：opencode 进程内会缓存已构建的模型客户端（缓存键不含凭据），auth 变更不会使缓存失效——切换仅更新认证文件，**需重启 opencode 后生效**，运行中的进程继续使用旧账号。
 - 插件生命周期：opencode 启动时加载插件，插件拉起 TokenHub.exe（互斥锁保证单实例）；opencode 退出时插件回收子进程；若父进程异常消失，额度条会自行退出。
 
 ## dsh 插件（dsh 分支）
@@ -73,18 +75,18 @@ dsh 插件位于 `dsh-tokenhub/`，仅在 dsh 分支提供；使用方式与桌�
 
 ## 测试与验证
 
-- Python：`python -m unittest discover -s tests -v`，221 项通过（桌面 API、认证文件、刷新状态、设置流程等）。
+- Python：`python -m unittest discover -s tests -v`，245 项通过（桌面 API、认证文件、刷新状态、设置流程等）。
 - 桌面插件：`node plugin/smoke_test.mjs`，PASS；覆盖认证路径显式覆盖、BOM、回滚与宿主 API 超时核对等，仅使用本地临时文件/回环 stub，不访问外网。
-- dsh 插件（dsh 分支）：在 `dsh-tokenhub` 下运行 `npm test`，共 317 项：host 120、client 95、usage-contract 57、account-concurrency 28、snapshot 17。
+- dsh 插件（dsh 分支）：在 `dsh-tokenhub` 下运行 `npm test`，共 372 项：host 128、client 116、usage-contract 65、account-concurrency 31、snapshot 32。
 - 上列为自动化结果；真实 opencode/dsh 宿主交互（真实切换、真实额度接口、多屏/DPI 等）需按宿主版本单独验收，不能由单测替代。
 
 ## FAQ
 
-- 密钥存在哪里，安全吗？密钥明文保存在本机 `config.json`（exe 同目录，不可写时回退 `%LOCALAPPDATA%\TokenHub\`）与 opencode 的 `auth.json` 中——与 opencode 自身的存储方式一致。额度条界面与日志只显示掩码（前 6 位 + … + 后 4 位）。桌面程序的额度请求固定发往官方 `https://opencode.ai/zen/go/v1/usage`；dsh 插件若配置了自定义 `baseUrl`，请求会发往该地址，此时不能笼统声称只出站 `opencode.ai`。
+- 密钥存在哪里，安全吗？密钥明文保存在本机 `config.json`（exe 同目录，不可写时回退 `%LOCALAPPDATA%\TokenHub\`）与 opencode 的 `auth.json` 中——与 opencode 自身的存储方式一致。额度条界面与日志只显示掩码（旧 `sk-` 密钥前 6 位、新 `oc_sk_` 密钥前 8 位，均保留后 4 位）。桌面程序的额度请求固定发往官方 `https://opencode.ai/zen/go/v1/usage`；dsh 插件若配置了自定义 `baseUrl`，请求会发往该地址，此时不能笼统声称只出站 `opencode.ai`。
 - 切换后什么时候生效？切换会更新 opencode 的认证文件；由于 opencode 进程内模型客户端缓存（缓存键不含凭据），auth 变更不会使缓存失效——**重启 opencode 后生效**，运行中的进程不会即时改变账号。界面会持续显示「已配置，待重启」，而不是声称运行时已切换。外部修改 auth.json 时显示「配置已变更，运行时账号未确认」。
-- 切换失败会怎样？写入失败会自动回滚到原密钥并红色提示；切换前会自动备份（保留最近 5 份）。宿主控制接口超时时先核对认证文件，无法确认则提示“待确认”并停止重复写入。
+- 切换失败会怎样？写入失败会自动回滚到原密钥并红色提示；切换前会自动备份（保留最近 5 份）。宿主控制接口超时时先核对认证文件，无法确认则提示“待确认”并停止重复写入；宿主返回非 2xx 拒绝时直接提示失败原因，不写认证文件。
 - 如何卸载？删除插件文件 `%USERPROFILE%\.config\opencode\plugins\tokenhub.ts`，删除程序文件 `%LOCALAPPDATA%\TokenHub\`（含 TokenHub.exe 与日志），再删除配置 `config.json`（位于 exe 同目录或 `%LOCALAPPDATA%\TokenHub\`）。auth.json 由 opencode 管理，卸载不影响。
-- 构建需要什么？Python 3.13 与 PyInstaller（`python -m pip install pyinstaller`），项目根运行 `python build.py`。成功后会生成 `dist\build-manifest.json`，可用 `source_commit` 与 `exe_sha256` 追溯产物。
+- 构建需要什么？Python 3.13 与 PyInstaller（`python -m pip install pyinstaller`），项目根运行 `python build.py`。成功后会生成 `dist\build-manifest.json`，可用 `source_commit`、`source_dirty` 与 `exe_sha256` 追溯产物（`source_dirty=true` 表示包含未提交改动）。
 
 ## 已知事项
 

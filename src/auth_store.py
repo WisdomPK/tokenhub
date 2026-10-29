@@ -2,11 +2,12 @@
 """TokenHub v3 auth.json 读取与安全切换。
 
 路径解析（spec 3.2）：
-  1. 环境变量 OPENCODE_AUTH_PATH（仅测试用）
-  2. %XDG_DATA_HOME%\\opencode\\auth.json（若设置）
-  3. ~/.local/share/opencode/auth.json  ← 本机实际
-  4. ~/.opencode/auth.json
-优先"存在且含 opencode-go 字段"的文件；都不存在时默认目标为第 1 项。
+  1. 构造参数显式 path（唯一目标，不回退）
+  2. 环境变量 OPENCODE_AUTH_PATH（设置时唯一目标，不回退；仅测试/显式覆盖）
+  3. %XDG_DATA_HOME%\\opencode\\auth.json（若设置）
+  4. ~/.local/share/opencode/auth.json  ← 本机实际
+  5. ~/.opencode/auth.json
+未显式指定时优先"存在且含 opencode-go 字段"的文件；都不存在时默认目标为第 1 项。
 
 切换：备份（保留最近 5 份）+ 同目录临时文件 + os.replace 原子替换 + 读回校验 + 失败回滚。
 仅改 opencode-go 字段，保留其他键。
@@ -35,10 +36,10 @@ class AuthStore:
     def _candidates(self) -> list[str]:
         if self._explicit_path:
             return [self._explicit_path]
-        candidates = []
         env_path = os.environ.get("OPENCODE_AUTH_PATH")
         if env_path:
-            candidates.append(env_path)
+            return [env_path]  # 显式环境路径 = 唯一目标（不回退默认文件）
+        candidates = []
         xdg = os.environ.get("XDG_DATA_HOME")
         if xdg:
             candidates.append(os.path.join(xdg, "opencode", "auth.json"))

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from main import TokenHubApp  # noqa: E402
 from floating_window import FloatingWindow  # noqa: E402
-from config import ConfigWriteBlocked  # noqa: E402
+from config import Config, ConfigWriteBlocked  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
 from account_service import AccountService, SwitchResult  # noqa: E402
 from api import AccountUsage, UsageMetric  # noqa: E402
@@ -500,6 +500,21 @@ class CountdownDueWindowTests(unittest.TestCase):
              'usage': _Usage('2000-01-01T00:00:00+00:00')},
         ]
         self.assertEqual(win._collect_due_keys(), [])
+
+    def test_tick_exception_log_masks_full_key(self):
+        key = "sk-SUPERSECRETKEY1234567890"
+        win = object.__new__(FloatingWindow)
+        win._metric_blocks = [{
+            'key': key, 'metric': 'rolling',
+            'update': mock.Mock(side_effect=RuntimeError('boom')),
+        }]
+        win._collect_due_keys = mock.Mock(return_value=[])
+        win.window = mock.Mock()
+        with self.assertLogs('TokenHub', level='ERROR') as captured:
+            win._tick_second()
+        output = '\n'.join(captured.output)
+        self.assertNotIn(key, output)
+        self.assertIn(Config.mask_key(key), output)
 
 
 # ---------------------------------------------------------------------------
