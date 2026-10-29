@@ -189,9 +189,9 @@ export function createAccountService(credentials, options) {
   const unlistedNameError = (name) =>
     '账号名「' + name + '」不在配置 keyNames 允许列表中，请先修改配置 keyNames 后再试'
 
-  /** A blank add cannot generate a name in explicit mode. */
-  const MSG_BLANK_EXPLICIT =
-    '已配置 keyNames 固定允许列表，新增账号请填写列表中的账号名；如需自动命名，请先移除 keyNames 配置'
+  /** A blank add cannot generate a name the fixed list would make invisible. */
+  const unlistedGeneratedError = (name) =>
+    '自动生成的账号名「' + name + '」不在配置 keyNames 允许列表中；请填写列表中的账号名，或把「' + name + '」加入配置 keyNames 后再试'
 
   /**
    * Resolve one reference. A missing value is null; a storage failure is an
@@ -453,8 +453,6 @@ export function createAccountService(credentials, options) {
       if (await isConfigured(POOL_PREFIX + requestedName)) {
         return fail('账号「' + requestedName + '」已存在')
       }
-    } else if (allowedNames !== null) {
-      return fail(MSG_BLANK_EXPLICIT)
     }
     if (!KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
       return fail('密钥需以 sk- 或 oc_sk_ 开头')
@@ -474,6 +472,9 @@ export function createAccountService(credentials, options) {
       // Default naming is inside the queue too: two blank-name adds must not
       // hand out the same goN.
       const target = requestedName !== null ? requestedName : await nextDefaultName()
+      // A generated name is usable only when the fixed list can discover it
+      // again; otherwise filling a listed name is the way forward.
+      if (requestedName === null && !nameAllowed(target)) return fail(unlistedGeneratedError(target))
       const ref = POOL_PREFIX + target
       if (await isConfigured(ref)) return fail('账号「' + target + '」已存在')
 

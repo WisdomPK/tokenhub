@@ -91,7 +91,7 @@ Add a config block to the plugin row in your profile's cordis.patch.yml:
 | autoReleaseWedgedLock | true | Judge and clear a leftover write lock, then retry |
 | wedgedLockMinAgeMs | 30000 | How long an incomplete lock record must sit before it counts as leftover |
 
-`keyNames` is a **fixed allowlist**, not a discovery hint: when it is set (even to `[]`), the pool lists exactly those names, and every add, join-pool, or rename target must already be in the list. Renaming therefore starts in the config — add the new name to `keyNames`, rename in the panel, then drop the old name.
+`keyNames` is a **fixed allowlist**, not a discovery hint: when it is set (even to `[]`), the pool lists exactly those names, and every add, join-pool, or rename target must already be in the list. Renaming therefore starts in the config — add the new name to `keyNames`, rename in the panel, then drop the old name. A blank add still auto-generates a `goN` candidate, but it succeeds only when that generated name is in the list; otherwise enter a listed name or add the generated one to `keyNames`.
 
 ## How it works
 

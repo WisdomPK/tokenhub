@@ -616,11 +616,56 @@ check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EAC
 
   const refusedBlank = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', key: KEY_A } })).body
   check(
-    'an explicit list refuses a blank generated name',
-    refusedBlank.ok === false && /keyNames/.test(refusedBlank.error || ''),
+    'an explicit list refuses a generated name outside the list',
+    refusedBlank.ok === false && /自动生成/.test(refusedBlank.error || '') && /keyNames/.test(refusedBlank.error || ''),
     JSON.stringify(refusedBlank).slice(0, 200),
   )
   check('a refused blank-name add writes no credential', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['go1'] })
+  await settle()
+  const blankAdd = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', key: KEY_A } })).body
+  check(
+    'a blank add succeeds when its generated name is in the explicit list',
+    blankAdd.ok === true && blankAdd.name === 'go1',
+    JSON.stringify(blankAdd).slice(0, 200),
+  )
+  check('the generated listed name is written', st.refs.get('OPENCODE_GO_KEY_go1') === KEY_A)
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['alpha'] })
+  await settle()
+  const refsBefore = JSON.stringify(Array.from(st.refs.entries()).sort())
+  const refusedGenerated = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'add', key: KEY_A } })).body
+  check(
+    'a blank add is refused when its generated name is outside the explicit list',
+    refusedGenerated.ok === false &&
+      /自动生成/.test(refusedGenerated.error || '') &&
+      /keyNames/.test(refusedGenerated.error || ''),
+    JSON.stringify(refusedGenerated).slice(0, 200),
+  )
+  check('the refused generated-name add writes nothing', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  const c = makeCtx(st)
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['alpha'] })
+  await settle()
+  const joinedFree = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'joinPool', name: 'alpha' } })).body
+  check(
+    'joinPool succeeds for a free name inside the explicit list',
+    joinedFree.ok === true && st.refs.get('OPENCODE_GO_KEY_alpha') === KEY_A,
+    JSON.stringify(joinedFree).slice(0, 200),
+  )
+  check('the joined listed name becomes the active marker', st.refs.get('OPENCODE_GO_KEY_ACTIVE') === 'alpha')
 }
 {
   const st = makeStore()
@@ -661,6 +706,12 @@ check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EAC
     'an empty explicit list allows no rename',
     emptyRename.ok === false && /keyNames/.test(emptyRename.error || ''),
     JSON.stringify(emptyRename).slice(0, 200),
+  )
+  const emptyJoin = (await request(c, ACCOUNT, { method: 'POST', body: { op: 'joinPool', name: 'new' } })).body
+  check(
+    'an empty explicit list allows no joinPool',
+    emptyJoin.ok === false && /keyNames/.test(emptyJoin.error || ''),
+    JSON.stringify(emptyJoin).slice(0, 200),
   )
   check('the empty explicit list writes nothing', JSON.stringify(Array.from(st.refs.entries()).sort()) === refsBefore)
 }
