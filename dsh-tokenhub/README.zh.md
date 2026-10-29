@@ -119,7 +119,7 @@ OPENCODE_GO_KEY_<名> 的**数量与名字任意**。池为空时退化为单密
 
 ```powershell
 npm install          # 只为测试装 react / react-dom / jsdom
-npm test             # 128 Host + 116 Client + 65 契约 + 31 并发 + 32 快照（共 372 项）
+npm test             # 151 Host + 116 Client + 68 契约 + 31 并发 + 32 快照（共 398 项）
 ```
 
 - test/host.test.mjs —— 内存凭据桩 + 打桩的用量接口，覆盖池发现、当前账号判定、切换与回滚、增删校验、同源拦截

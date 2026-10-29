@@ -119,7 +119,7 @@ Writes are same-origin checked: a request carrying an Origin that does not match
 
 ```powershell
 npm install          # react / react-dom / jsdom, for the tests only
-npm test             # 128 host + 116 client + 65 usage-contract + 31 concurrency + 32 snapshot (372 checks)
+npm test             # 151 host + 116 client + 68 usage-contract + 31 concurrency + 32 snapshot (398 checks)
 ```
 
 - test/host.test.mjs — an in-memory credential store plus a stubbed usage endpoint, covering pool discovery, active-account resolution, switch and rollback, add/remove validation, and the same-origin fence
