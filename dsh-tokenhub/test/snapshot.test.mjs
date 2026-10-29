@@ -318,6 +318,34 @@ try {
     )
   }
 
+  // ================= a malformed response still shows the last good windows =================
+  {
+    const accounts = identity([row('current', '', 'KEY_A', true, false)])
+    let call = 0
+    const good = {
+      error: null,
+      detail: null,
+      windows: {
+        rolling: { status: 'ok', percent: 10, resetsAt: null },
+        weekly: { status: 'ok', percent: 20, resetsAt: null },
+        monthly: { status: 'ok', percent: 30, resetsAt: null },
+      },
+    }
+    const fetchUsages = async () => {
+      call += 1
+      if (call === 1) return new Map([['KEY_A', good]])
+      return new Map([['KEY_A', { error: 'bad-json', detail: 'json parse failed', windows: null }]])
+    }
+    const service = createSnapshotService({ readAccounts: async () => accounts, fetchUsages, now: () => 1000, refreshMs: 60000 })
+    await service.snapshot(true)
+    service.invalidate()
+    const malformed = await service.snapshot(false)
+    const rolling = malformed.entries[0].windows.rolling
+    check('a malformed response keeps the last good window', rolling.percent === 10 && rolling.stale === true, JSON.stringify(rolling))
+    check('a malformed response keeps the last success time', rolling.lastSuccessAt === 1000, JSON.stringify(rolling))
+    check('a malformed response stays visible as the account-level error', malformed.entries[0].error === 'bad-json', String(malformed.entries[0].error))
+  }
+
   // ================= a current-generation batch failure keeps the last entries =================
   {
     const accounts = identity([row('current', '', 'KEY_A', true, false)])

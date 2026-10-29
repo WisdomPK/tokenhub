@@ -191,9 +191,9 @@ export function createSnapshotService({ readAccounts, fetchUsages, now = Date.no
       const reading = usage.get(row.key) || { error: 'internal', detail: 'usage result missing', windows: null }
       const windows = {}
       for (const name of WINDOWS) windows[name] = windowReading(row.key, name, reading, attemptedAt)
-      // A malformed whole response stays distinguishable from "this window is
-      // unavailable": it has no window object to show, not three empty values.
-      const malformed = reading.error === 'bad-json' && !reading.windows
+      // A malformed response still consults each window's history: the last
+      // good reading must survive a parse failure. The account-level error keeps
+      // the "malformed vs unavailable" distinction.
       return {
         id: row.id,
         name: row.name,
@@ -202,7 +202,7 @@ export function createSnapshotService({ readAccounts, fetchUsages, now = Date.no
         inPool: row.inPool,
         error: reading.error || null,
         detail: reading.detail || null,
-        windows: malformed ? null : windows,
+        windows,
       }
     })
 

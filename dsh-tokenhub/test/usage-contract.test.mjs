@@ -225,7 +225,11 @@ try {
   }
   {
     const row = await rowFor([1, 2, 3])
-    check('a top-level array is a malformed response', row.error === 'bad-json' && row.windows === null, JSON.stringify(row.error))
+    check(
+      'a top-level array is a malformed response with unavailable windows',
+      row.error === 'bad-json' && row.windows !== null && row.windows.rolling.percent === null,
+      JSON.stringify([row.error, row.windows && row.windows.rolling]),
+    )
   }
   {
     const row = await rowFor({ usage: {} })

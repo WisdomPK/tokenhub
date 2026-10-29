@@ -69,6 +69,7 @@ window.__ModuleLoader__.load({
       ok: '确定',
       offline: '离岔',
       noData: '数据不可用',
+      badResponse: '响应解析失败',
       lastData: '上次',
       reset: '即将重置',
       addTitle: '新增账号',
@@ -120,6 +121,7 @@ window.__ModuleLoader__.load({
       ok: 'OK',
       offline: 'offline',
       noData: 'no data',
+      badResponse: 'Invalid response',
       lastData: 'last',
       reset: 'resetting',
       addTitle: 'Add account',
@@ -605,37 +607,43 @@ window.__ModuleLoader__.load({
     /** The expanded panel: header, one card per account, and the last message. */
     function Panel(props) {
       const { data, failed, entries, thresholds, busy, toast, addButton } = props
-      let body
-      if (failed) {
-        body = h('div', { className: 'th-empty' }, t.loadFailed + ' · ' + (typeof failed === 'string' ? failed : t.noData))
-      } else if (!data) body = h('div', { className: 'th-empty' }, t.loading)
-      else if (entries.length === 0) {
-        body = h(
-          'div',
-          { className: 'th-empty' },
-          h('div', null, data.error === 'no-keys' ? t.noKeys : t.noEntries),
-          addButton,
-        )
-      } else {
-        const cards = entries.map((entry) => {
-          // The host half and the bundle have independent lifecycles — dsh serves
-          // the bundle by revision from the boot graph while the host module is
-          // cached by URL — so an older host may send no id at all. Its name is
-          // the id then, which is what the routes took before ids existed.
-          const rowId = entry.id || entry.name
-          return h(AccountCard, {
-            key: rowId,
-            entry,
-            thresholds,
-            busy,
-            open: props.open,
-          })
+      const cards = entries.map((entry) => {
+        // The host half and the bundle have independent lifecycles — dsh serves
+        // the bundle by revision from the boot graph while the host module is
+        // cached by URL — so an older host may send no id at all. Its name is
+        // the id then, which is what the routes took before ids existed.
+        const rowId = entry.id || entry.name
+        return h(AccountCard, {
+          key: rowId,
+          entry,
+          thresholds,
+          busy,
+          open: props.open,
         })
+      })
+      const failure = failed
+        ? h('div', { className: 'th-empty' }, t.loadFailed + ' · ' + (typeof failed === 'string' ? failed : t.noData))
+        : null
+      let body
+      if (!data && !failed) body = h('div', { className: 'th-empty' }, t.loading)
+      else if (entries.length === 0) {
+        body = failed
+          ? failure
+          : h(
+              'div',
+              { className: 'th-empty' },
+              h('div', null, data.error === 'no-keys' ? t.noKeys : t.noEntries),
+              addButton,
+            )
+      } else {
         // Safety net: with no row in force (no key configured, say) the panel
         // still offers Add rather than leaving the user with no way forward.
-        body = entries.some((entry) => entry.active)
+        const list = entries.some((entry) => entry.active)
           ? cards
           : h(React.Fragment, null, cards, h('div', { className: 'th-empty' }, h('div', null, t.noActive), addButton))
+        // A failed snapshot that still carries entries shows the error and the
+        // stale cards; hiding the old data is not part of "clear failure".
+        body = failed ? h(React.Fragment, null, failure, list) : list
       }
 
       return h(
@@ -695,21 +703,32 @@ window.__ModuleLoader__.load({
         fetch(SNAPSHOT + (force ? '?force=1' : ''), { headers: { Accept: 'application/json' } })
           .then(async (res) => {
             let payload = null
+            let readable = true
             try {
               payload = await res.json()
             } catch {
-              payload = null
+              readable = false
             }
             if (!res.ok) {
               const message = payload && payload.error ? payload.error : 'HTTP ' + res.status
-              throw new Error(message)
+              // An explicit failure may carry the last stale entries; hand them
+              // to the panel instead of discarding what the user was seeing.
+              return { ok: false, payload, error: message }
             }
-            return payload
+            if (!readable) return { ok: false, payload: null, error: t.badResponse }
+            return { ok: true, payload }
           })
-          .then((payload) => {
+          .then((outcome) => {
             if (!mounted.current || seq !== loadSeq.current) return
-            setData(payload)
-            setFailed(false)
+            if (outcome.ok) {
+              setData(outcome.payload)
+              setFailed(false)
+              return
+            }
+            if (outcome.payload && Array.isArray(outcome.payload.entries) && outcome.payload.entries.length > 0) {
+              setData(outcome.payload)
+            }
+            setFailed(outcome.error)
           })
           .catch((error) => {
             if (!mounted.current || seq !== loadSeq.current) return
@@ -787,10 +806,10 @@ window.__ModuleLoader__.load({
 
       const thresholds = (data && data.thresholds) || FALLBACK_THRESHOLDS
       const entries = (data && data.entries) || []
-      // The gauge's three bars, top to bottom: rolling, weekly, monthly. A failed
-      // snapshot is folded in as an empty list, so every bar reads "no data"
-      // rather than three calm ones.
-      const bars = barShape(failed ? [] : entries, thresholds)
+      // The gauge's three bars, top to bottom: rolling, weekly, monthly. A
+      // failed snapshot with carried entries keeps their stale widths in the
+      // neutral band; a first failure with no entries draws three empty tracks.
+      const bars = barShape(entries, thresholds)
 
       const openDialog = (next) => {
         setToast(null)

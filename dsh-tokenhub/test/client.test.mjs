@@ -638,6 +638,46 @@ try {
     globalThis.fetch = liveFetch
   }
 
+  // ================= a failed snapshot that carries stale entries still shows them =================
+  {
+    const liveFetch = globalThis.fetch
+    const staleEntry = poolRow('cached', true, {
+      rolling: { status: 'ok', percent: 33, resetsAt: null, stale: true, error: 'internal: stale batch', lastSuccessAt: NOW - 60000, lastAttemptAt: NOW },
+      weekly: win(10, 1),
+      monthly: win(20, 1),
+    })
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 500,
+      async json() {
+        return { ok: false, error: 'internal: stale batch', entries: [staleEntry] }
+      },
+    })
+    const hostCarry = await mount()
+    await click(q(hostCarry, '.th-gauge'))
+    check('a failed snapshot with entries still renders the old card', txt(hostCarry).indexOf('cached') !== -1, txt(hostCarry).slice(0, 140))
+    check('the failed snapshot error is shown above the old card', /internal: stale batch/.test(txt(hostCarry)), txt(hostCarry).slice(0, 140))
+    check('the carried card keeps its stale marker', q(hostCarry, '.th-gauge-fill.na') !== null && /上次/.test(txt(hostCarry)), all(hostCarry, '.th-gauge-fill').map((f) => f.className).join(','))
+    globalThis.fetch = liveFetch
+  }
+
+  // ================= 200 with invalid JSON is a failure, not permanent loading =================
+  {
+    const liveFetch = globalThis.fetch
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        throw new SyntaxError('Unexpected token < in JSON')
+      },
+    })
+    const hostBadBody = await mount()
+    await click(q(hostBadBody, '.th-gauge'))
+    check('a 200 with invalid JSON reports a parse failure', /响应解析失败/.test(txt(hostBadBody)), txt(hostBadBody).slice(0, 160))
+    check('a 200 with invalid JSON does not stay on the loading state', !/加载中/.test(txt(hostBadBody)), txt(hostBadBody).slice(0, 160))
+    globalThis.fetch = liveFetch
+  }
+
   // ================= English dictionary =================
   // Re-execute the bundle so its factory picks the other language.
   Object.defineProperty(dom.window.navigator, 'language', { value: 'en-US', configurable: true })
