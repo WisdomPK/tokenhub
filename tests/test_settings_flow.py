@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from main import TokenHubApp  # noqa: E402
+from refresh_state import RefreshState  # noqa: E402
 from settings_window import SettingsWindow  # noqa: E402
 
 
@@ -153,6 +154,7 @@ class ConfigSavedMainTests(unittest.TestCase):
         app = object.__new__(TokenHubApp)
         app.cfg = mock.Mock()
         app.cfg.settings = {"theme": "dark"}
+        app.refresh_state = RefreshState()
         app.theme = mock.Mock()
         app.theme.get_colors.return_value = {"bg": "#ffffff"}
         app.win = mock.Mock()

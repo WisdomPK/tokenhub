@@ -181,6 +181,7 @@ class FloatingWindow:
 
         # 数据
         self._data = (None, None, [])
+        self._views: dict = {}   # RefreshState.views（key → 窗口 → WindowView）
         self._switching_key: Optional[str] = None
         self._active_dialog: Optional[object] = None  # 活动模态弹窗（preview 驱动用）
         self._add_validator: Optional[Callable[[str], Optional[str]]] = None  # 可注入假校验器
@@ -335,7 +336,12 @@ class FloatingWindow:
         label = getattr(account, 'label', '') if account is not None else ''
         if not label:
             label = '未检测到当前账号' if is_current else '未命名'
-        offline = usage is None or self._usage_offline(usage)
+        row_views = self._views.get(key) if key else None
+        if row_views is not None:
+            # 有视图时以窗口级数据为准：任一窗口仍有（新/旧）读数就不是整行离线
+            offline = not any(v.metric is not None for v in row_views.values())
+        else:
+            offline = usage is None or self._usage_offline(usage)
 
         self._build_identity(row_idx, key, label, is_current, offline)
         # ---- 块间 1px 细竖分隔线 ----
@@ -386,20 +392,39 @@ class FloatingWindow:
         return self._format_countdown(
             getattr(metric, 'resets_at', None) if metric is not None else None)
 
-    def _metric_display(self, usage, metric_key: str, offline: bool):
-        """指标块两行文案：返回 (percent, pct_text, cd_text, icon, err_state)。"""
-        m = self._metric(usage, metric_key)
+    @staticmethod
+    def _format_clock(timestamp) -> str:
+        if timestamp is None:
+            return '--'
+        try:
+            return datetime.datetime.fromtimestamp(timestamp).strftime('%H:%M')
+        except (OSError, OverflowError, ValueError):
+            return '--'
+
+    def _metric_display(self, usage, metric_key: str, offline: bool, view=None):
+        """指标块两行文案：返回 (percent, pct_text, cd_text, icon, err_state, stale)。"""
+        m = view.metric if view is not None else self._metric(usage, metric_key)
         percent = self._metric_percent(m)
-        err = self._metric_error(m)
+        if view is not None and view.stale and m is not None:
+            # 旧有效值：保留读数，但明确标出上次时间与失败原因（不用正常色伪装）
+            return (percent,
+                    f'{display_percent(percent)}%',
+                    f'上次 {self._format_clock(view.last_success_at)} · '
+                    f'{self._metric_error_text(view.error)}',
+                    False, False, True)
+        if view is not None and view.error and m is None:
+            return (None, '不可用', self._metric_error_text(view.error),
+                    False, True, False)
+        err = self._metric_error(m) if view is None else view.error
         if offline:
             # 整行离线（无任何有效指标）：上行=标签、下行=「离线」（无 ⟳）
-            return percent, '', '离线', False, False
+            return percent, '', '离线', False, False, False
         if err:
             # U03：单项指标错误 → 上行=标签+状态短文案，下行=⟳ 倒计时
             # （其他指标照常显示；文案映射见 _metric_error_text）
-            return percent, self._metric_error_text(err), self._countdown(m), True, True
+            return percent, self._metric_error_text(err), self._countdown(m), True, True, False
         return (percent, f'{display_percent(percent)}%' if percent is not None else '--',
-                self._countdown(m), True, False)
+                self._countdown(m), True, False, False)
 
     def _block_width(self, label_text: str, pct_text: str, cd_text: str,
                      icon: bool, err_state: bool) -> int:
@@ -429,8 +454,9 @@ class FloatingWindow:
         同字号下明显发虚（用户 2x 实拍对比确认）；Label 控件渲染锐利，与
         [新增] 按钮同路径。面板内部背景统一 c['bg'] 实色（无透明键），圆角由
         SetWindowRgn 窗口级裁切（见 _apply_region）。"""
-        percent, pct_text, cd_text, icon, err_state = self._metric_display(
-            usage, metric_key, offline)
+        view = self._views.get(key, {}).get(metric_key) if key else None
+        percent, pct_text, cd_text, icon, err_state, stale = self._metric_display(
+            usage, metric_key, offline, view=view)
         gap = self.METRIC_GAP
         block = tk.Frame(self._rows, bg=self.c['bg'],
                          width=self._block_width(label_text, pct_text, cd_text,
@@ -450,8 +476,7 @@ class FloatingWindow:
             # 错误状态文案：9pt + offline 可读色；正常百分比：11pt bold 阈值色
             lbl_pct = self._label(
                 top, pct_text, self._f_sec if err_state else self._f_pct,
-                self.c['offline'] if (err_state or percent is None)
-                else self._pct_color(percent))
+                self._metric_fg(percent, err_state, stale))
             lbl_pct.pack(side=tk.LEFT, padx=(gap, 0))
         bot = tk.Frame(block, bg=self.c['bg'])
         bot.place(relx=0.5, y=41, anchor='center')
@@ -463,9 +488,11 @@ class FloatingWindow:
         # TH-08：update 每次调用重算倒计时文本（ticker 每秒调用），只
         # configure(text=...) 更新，不重建账号行；整行离线块结构固定
         def update(_u=usage, _mk=metric_key, _off=offline, _err=err_state,
-                   _lp=lbl_pct, _lc=lbl_cd):
-            if _off:
+                   _lp=lbl_pct, _lc=lbl_cd, _stale=stale, _view=view):
+            if _off or _stale:
                 return
+            if _view is not None and _view.error and _view.metric is None:
+                return  # 无旧值：静态显示「不可用」+ 原因
             m = self._metric(_u, _mk)
             if _err:
                 # U03：错误块上行状态文案固定，只更新倒计时（若有）
@@ -473,12 +500,13 @@ class FloatingWindow:
                 return
             p = self._metric_percent(m)
             _lp.configure(text=f'{display_percent(p)}%' if p is not None else '--',
-                          fg=self.c['offline'] if p is None else self._pct_color(p))
+                          fg=self._metric_fg(p, False, False))
             _lc.configure(text=self._countdown(m))
 
         self._metric_blocks.append({
             'update': update, 'key': key, 'metric': metric_key,
-            'offline': offline, 'error': err_state, 'usage': usage})
+            'offline': offline, 'error': err_state, 'stale': stale,
+            'usage': usage, 'view': view})
 
     def _build_tail(self, row_idx: int, key: str, label: str,
                     is_current: bool) -> None:
@@ -670,16 +698,20 @@ class FloatingWindow:
     def _countdown_due(self, blk) -> bool:
         """指标倒计时是否已归零（归零后显示「即将重置」；不在本地清零额度）。
         U03：错误块数据不完整，不参与归零上报。"""
-        if blk['offline'] or blk.get('error'):
+        if blk['offline'] or blk.get('error') or blk.get('stale'):
             return False
         m = self._metric(blk['usage'], blk['metric'])
         return self._format_countdown(getattr(m, 'resets_at', None)) == '即将重置'
 
     # ============ 数据 / 状态更新（冻结接口） ============
 
-    def update_accounts(self, current, current_usage, backups) -> None:
-        """刷新面板数据。backups: list[tuple[Account, AccountUsage | None]]。"""
+    def update_accounts(self, current, current_usage, backups, views=None) -> None:
+        """刷新面板数据。backups: list[tuple[Account, AccountUsage | None]]。
+
+        views 为 RefreshState.views（窗口级新鲜度）；缺省时保持旧行为。
+        """
         self._data = (current, current_usage, backups)
+        self._views = views or {}
         self._render_all()
         self._relayout()
 
@@ -1067,6 +1099,12 @@ class FloatingWindow:
     @staticmethod
     def _metric(usage, key):
         return getattr(usage, key, None) if usage is not None else None
+
+    def _metric_fg(self, percent, err_state: bool, stale: bool) -> str:
+        """百分比前景：错误/旧数据/缺失均用离线色，正常读数才按阈值着色。"""
+        if err_state or stale or percent is None:
+            return self.c['offline']
+        return self._pct_color(percent)
 
     def _pct_color(self, percent: Optional[float]) -> str:
         if percent is None:

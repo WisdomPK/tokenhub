@@ -22,7 +22,7 @@ import time
 
 import tkinter as tk
 
-from api import ApiClient
+from api import AccountUsage, ApiClient, UsageMetric, WINDOW_NAMES
 from auth_store import AuthStore
 from config import Account, Config, ConfigWriteBlocked
 from control_client import ControlClient
@@ -38,6 +38,7 @@ from logger import (
     log_startup,
     log_ui_action,
 )
+from refresh_state import RefreshState
 from settings_window import SettingsWindow
 from theme import ThemeManager
 from tray import TrayIcon
@@ -101,7 +102,7 @@ class TokenHubApp:
         self._leave_since: float | None = None
 
         # 数据状态
-        self._usages: dict = {}
+        self.refresh_state = RefreshState()
         self._last_fetch = 0.0
         self._current_key: str | None = None
         self._last_mtime: float | None = None
@@ -125,6 +126,7 @@ class TokenHubApp:
         log_config_load(len(self.cfg.accounts))
         if not self._check_config_load_error():
             self._reload_current_state()
+        self._last_mtime = self.store.mtime()
         self._maybe_refresh_now()
 
     def _check_config_load_error(self) -> bool:
@@ -349,14 +351,24 @@ class TokenHubApp:
         if not keys:
             return
         log_refresh_triggered()
+        revision = self.refresh_state.revision
         try:
             usages = self.api.fetch_all(keys)
         except Exception as e:
+            # fetch_all 按原约定不抛异常；此处仅防御装配/线程池级故障，错误仍可见
             log_api_error(str(e))
-            self._refresh_failed = True  # U02：供主线程 auto sticky 判定
-            return
-        self._last_fetch = time.time()
-        self._result_queue.put(("usage", usages))
+            attempted_at = time.time()
+            message = str(e) or "刷新失败"
+            metric = UsageMetric("error", None, None, message)
+            usages = {
+                key: AccountUsage(key, metric, metric, metric, attempted_at,
+                                  account_error=message)
+                for key in keys
+            }
+        else:
+            attempted_at = time.time()
+        # 后台线程只投递结果；成功时间/旧值保留由主线程 apply 统一提交
+        self._result_queue.put(("usage", (revision, usages, attempted_at)))
 
     def _maybe_refresh_now(self):
         """数据超过 15s 旧 → 唤醒刷新线程立即刷新。"""
@@ -379,14 +391,23 @@ class TokenHubApp:
             except queue.Empty:
                 return
             if kind == "usage":
-                self._usages = payload
-                self._refresh_failed = False
+                revision, usages, attempted_at = payload
+                if not self.refresh_state.apply(revision, usages, attempted_at):
+                    continue  # 过期批次：不覆盖新身份/新状态
+                self._last_fetch = attempted_at
+                self._refresh_failed = self._all_accounts_failed(usages)
                 log_data_update(False)
                 self._update_ui_accounts()
-                if self._sticky_reason == "auto":
+                if not self._refresh_failed and self._sticky_reason == "auto":
                     self._clear_sticky()  # U02：刷新成功且原因为 auto → 清除
             elif kind == "switch_result":
                 self._handle_switch_result(*payload)
+
+    def _all_accounts_failed(self, usages) -> bool:
+        """全量失败才置全局失败；部分窗口/账号失败由各窗口 stale 标识。"""
+        summaries = [self.refresh_state.account(key) for key in usages]
+        summaries = [s for s in summaries if s is not None]
+        return bool(summaries) and all(not s.latest_ok for s in summaries)
 
     # ------------------------------------------------------------- U02 sticky 编排
     def _set_sticky(self, reason: str, text: str, kind: str = "error") -> None:
@@ -442,16 +463,43 @@ class TokenHubApp:
         key = self.store.current_key()
         if key != self._current_key:
             self._current_key = key
+            # 身份变化使在途刷新批次失效，并立即安排新账号的数据刷新
+            self.refresh_state.invalidate()
             if not self.cfg.load_error:
                 # R2-01：配置损坏保护——不自动写入账号池（避免覆盖损坏文件）
                 self.cfg.ensure_current_in_pool(key)
+            self._force_refresh_now()
         self._update_ui_accounts()
 
     def _update_ui_accounts(self):
         key = self._current_key
         account = self.cfg.find_by_key(key) if key else None
-        backups = [(a, self._usages.get(a.key)) for a in self.cfg.accounts if a.key != key]
-        self.win.update_accounts(account, self._usages.get(key) if key else None, backups)
+        current_usage = self._usage_from_views(key) if key else None
+        backups = [(a, self._usage_from_views(a.key))
+                   for a in self.cfg.accounts if a.key != key]
+        self.win.update_accounts(account, current_usage, backups,
+                                 views=self.refresh_state.views)
+
+    def _usage_from_views(self, key: str) -> AccountUsage | None:
+        """把窗口级视图合成为 FloatingWindow 消费的 AccountUsage（旧值也保留）。"""
+        row = self.refresh_state.views.get(key)
+        if row is None:
+            return None
+        metrics = []
+        attempts = []
+        for name in WINDOW_NAMES:
+            view = row.get(name)
+            if view is None:
+                metrics.append(UsageMetric("error", None, None, "数据不可用"))
+                continue
+            if view.last_attempt_at is not None:
+                attempts.append(view.last_attempt_at)
+            if view.metric is not None:
+                metrics.append(view.metric)
+            else:
+                metrics.append(UsageMetric("error", None, None, view.error))
+        return AccountUsage(key, metrics[0], metrics[1], metrics[2],
+                            max(attempts) if attempts else time.time())
 
     # ------------------------------------------------------------- 父进程看护
     def _poll_parent(self):
@@ -627,6 +675,7 @@ class TokenHubApp:
             log_exception("add_account", e)
             self.win.set_toast(f"新增失败（{e}）", "error")
             return (False, str(e) or "写入配置失败")
+        self.refresh_state.invalidate()
         self._update_ui_accounts()
         self._force_refresh_now()
         return (True, "")
@@ -650,6 +699,7 @@ class TokenHubApp:
         except Exception as e:
             log_exception("remove_account", e)
             return (False, str(e) or "删除失败")
+        self.refresh_state.invalidate()
         self._update_ui_accounts()
         self._force_refresh_now()
         return (True, "")
@@ -694,6 +744,7 @@ class TokenHubApp:
         except Exception as e:
             log_exception("theme", e)
         # 账号列表立即反映增删/改名，再强制刷新数据（不等 15s 节流/下轮轮询）
+        self.refresh_state.invalidate()
         self._update_ui_accounts()
         self._force_refresh_now()
 

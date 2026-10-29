@@ -97,7 +97,7 @@ class PercentContractTests(unittest.TestCase):
             "k", UsageMetric("ok", 59.6, None),
             UsageMetric("ok", 84.9, None), UsageMetric("ok", 120, None),
             time.time())
-        _p, pct_text, _cd, _icon, _err = win._metric_display(
+        _p, pct_text, _cd, _icon, _err, _stale = win._metric_display(
             usage, "rolling", False)
         self.assertEqual(pct_text, "60%")
         self.assertEqual(win._pct_color(59.6), "fg")

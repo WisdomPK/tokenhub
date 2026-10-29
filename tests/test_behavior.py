@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 from main import TokenHubApp  # noqa: E402
 from floating_window import FloatingWindow  # noqa: E402
 from config import ConfigWriteBlocked  # noqa: E402
+from refresh_state import RefreshState  # noqa: E402
 
 
 def _bare_app() -> TokenHubApp:
@@ -28,7 +29,7 @@ def _bare_app() -> TokenHubApp:
     app._switching_inflight = False
     app._switch_gen = 0
     app._countdown_due_at = {}
-    app._usages = {}
+    app.refresh_state = RefreshState()
     app._last_fetch = time.time()
     app._current_key = None
     app._manual_visible = False
@@ -855,7 +856,7 @@ class StickyToastTests(unittest.TestCase):
         """刷新成功且原因为 auto → clear_transient()。"""
         app = self._app()
         app._set_sticky('auto', '数据较旧 · 点击刷新', 'info')
-        app._result_queue.put(('usage', {}))
+        app._result_queue.put(('usage', (app.refresh_state.revision, {}, time.time())))
         app._poll_results()
         self.assertIsNone(app._sticky_reason)
         app.win.clear_transient.assert_called_once()
@@ -864,7 +865,7 @@ class StickyToastTests(unittest.TestCase):
         """刷新成功不清除手动类 sticky（config）。"""
         app = self._app()
         app._set_sticky('config', '配置无法读取，已保护原文件：C:/x', 'error')
-        app._result_queue.put(('usage', {}))
+        app._result_queue.put(('usage', (app.refresh_state.revision, {}, time.time())))
         app._poll_results()
         self.assertEqual(app._sticky_reason, 'config')
         app.win.clear_transient.assert_not_called()
