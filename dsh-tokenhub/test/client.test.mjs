@@ -80,6 +80,8 @@ let SNAPSHOT = {
 }
 const calls = []
 let switchAuthFailed = false
+let switchWarnings = null
+let holdSwitch = null
 globalThis.fetch = async (url, init) => {
   const target = String(url)
   const reply = (payload) => ({ ok: true, status: 200, async json() { return payload } })
@@ -87,12 +89,20 @@ globalThis.fetch = async (url, init) => {
   const body = init && init.body ? JSON.parse(init.body) : null
   calls.push({ url: target, body })
   if (target === '/plugins/dsh-tokenhub/switch') {
+    if (holdSwitch) {
+      const gate = holdSwitch
+      holdSwitch = null
+      await gate
+    }
+    const warnings = switchWarnings || []
     return reply({
       ok: true,
       name: body.name,
       message:
         '\u5df2\u5207\u6362\u5230\u300c' + body.name + '\u300d\uff0c\u4e0b\u4e00\u4e2a\u8bf7\u6c42\u5373\u751f\u6548' +
-        (switchAuthFailed ? '\uff1bopencode \u540c\u6b65\u5931\u8d25\uff1a\u6743\u9650\u4e0d\u8db3' : ''),
+        (switchAuthFailed ? '\uff1bopencode \u540c\u6b65\u5931\u8d25\uff1a\u6743\u9650\u4e0d\u8db3' : '') +
+        warnings.map((w) => '\uff1b' + w.message).join(''),
+      warnings,
       opencodeAuth: { enabled: true, ok: !switchAuthFailed, message: switchAuthFailed ? '\u6743\u9650\u4e0d\u8db3' : '\u5df2\u540c\u6b65' },
     })
   }
@@ -198,6 +208,51 @@ try {
   await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))
   check('switch posted after confirming', calls.length === 1 && calls[0].url === '/plugins/dsh-tokenhub/switch' && calls[0].body.name === 'go1', JSON.stringify(calls[0] || null))
   check('switch result surfaced', text().indexOf('\u4e0b\u4e00\u4e2a\u8bf7\u6c42\u5373\u751f\u6548') !== -1)
+
+  // A warning is not an ordinary success toast: it stays until dismissed or
+  // replaced, so it must not schedule the usual auto-dismiss timer.
+  switchWarnings = [{ code: 'active-marker', message: '\u300c\u4f7f\u7528\u4e2d\u300d\u6807\u8bb0\u5199\u5165\u5931\u8d25\uff1adisk' }]
+  const realSetTimeout = globalThis.setTimeout
+  let dismissTimer = null
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    if (ms === 4500) {
+      dismissTimer = fn
+      return 0
+    }
+    return realSetTimeout(fn, ms, ...args)
+  }
+  await click(byText(host, 'button', '\u5207\u6362'))
+  await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))
+  globalThis.setTimeout = realSetTimeout
+  check('a warning toast is styled as a warning', q(host, '.th-toast.warn') !== null, q(host, '.th-toast') && q(host, '.th-toast').className)
+  check('the warning text is visible', /标记写入失败/.test(txt(host)), txt(host).slice(-80))
+  check('a warning offers an explicit close', q(host, '.th-toast-close') !== null)
+  check('a warning does not schedule the short success dismissal', dismissTimer === null)
+  await click(q(host, '.th-toast-close'))
+  check('closing the warning clears it', q(host, '.th-toast') === null)
+  switchWarnings = null
+
+  // While one mutation is in flight every conflicting action is disabled.
+  let releaseSwitch
+  holdSwitch = new Promise((r) => { releaseSwitch = r })
+  await click(byText(host, 'button', '\u5207\u6362'))
+  await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))
+  const inFlight = all(host, 'button').filter((b) => {
+    const label = (b.textContent || '').trim()
+    return label === '\u5207\u6362' || label === '\u5220\u9664'
+  })
+  check(
+    'an in-flight mutation disables switch and remove everywhere',
+    inFlight.length > 0 && inFlight.every((b) => b.disabled),
+    inFlight.map((b) => (b.textContent || '').trim() + ':' + b.disabled).join(','),
+  )
+  check('no second dialog can be opened while busy', q(host, '.th-modal') === null)
+  await act(async () => {
+    releaseSwitch()
+    await new Promise((r) => setTimeout(r, 40))
+  })
+  check('the in-flight mutation resumes and reports', q(host, '.th-toast.ok') !== null, q(host, '.th-toast') && q(host, '.th-toast').className)
+
   switchAuthFailed = true
   await click(byText(host, 'button', '\u5207\u6362'))
   await click(byText(host, '.th-modal button', '\u786e\u8ba4\u5207\u6362'))

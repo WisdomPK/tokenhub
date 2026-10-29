@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
       switchCta: '确认切换',
       removeCta: '删除',
       hostError: 'Host 错误',
+      close: '关闭提示',
     }
 
     const en = {
@@ -132,6 +133,7 @@ window.__ModuleLoader__.load({
       switchCta: 'Switch',
       removeCta: 'Remove',
       hostError: 'Host error',
+      close: 'Dismiss',
     }
 
     const t = typeof navigator !== 'undefined' && /^\s*zh/i.test(navigator.language || '') ? zh : en
@@ -217,6 +219,8 @@ window.__ModuleLoader__.load({
         '.th-toast.ok{background:var(--dsw-alias-state-success-tertiary);color:var(--dsw-alias-label-primary)}',
         '.th-toast.err{background:var(--dsw-alias-state-error-secondary);color:var(--dsw-alias-label-primary)}',
         '.th-toast.info{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}',
+        '.th-toast.warn{background:var(--dsw-alias-state-warn-secondary);color:var(--dsw-alias-label-primary)}',
+        '.th-toast-close{float:right;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;padding:0 0 0 8px}',
 
         '.th-mask-layer{position:fixed;inset:0;z-index:1001;background:var(--dsw-alias-bg-mask-2);display:flex;align-items:center;justify-content:center}',
         '.th-modal{width:298px;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l2);',
@@ -521,17 +525,17 @@ window.__ModuleLoader__.load({
 
     /** One account card: identity, three metric rows, and the row's actions. */
     function AccountCard(props) {
-      const { entry, rowId, thresholds, busy, open } = props
+      const { entry, thresholds, busy, open } = props
       const inPool = entry.inPool !== false
       const actions = []
       // The row in force carries Add. It is the row the user is looking at, and
       // the panel must never end up with no way to add another account.
       if (entry.active) {
-        actions.push(h('button', { className: 'th-btn', key: 'add', onClick: () => open({ kind: 'add' }) }, t.add))
+        actions.push(h('button', { className: 'th-btn', key: 'add', disabled: busy, onClick: () => open({ kind: 'add' }) }, t.add))
         // A key with no pool entry behind it disappears the moment a switch
         // replaces it, so offer to file it before that can happen.
         if (!inPool) {
-          actions.push(h('button', { className: 'th-btn', key: 'join', onClick: () => open({ kind: 'join' }) }, t.join))
+          actions.push(h('button', { className: 'th-btn', key: 'join', disabled: busy, onClick: () => open({ kind: 'join' }) }, t.join))
         }
       }
       if (!entry.active && inPool) {
@@ -543,7 +547,7 @@ window.__ModuleLoader__.load({
       // the account in force as well as on a spare.
       if (inPool) {
         const onClick = () => open({ kind: 'rename', from: entry.name, current: entry.name })
-        actions.push(h('button', { className: 'th-btn', key: 'rename', onClick }, t.rename))
+        actions.push(h('button', { className: 'th-btn', key: 'rename', disabled: busy, onClick }, t.rename))
       }
       if (!entry.active && inPool) {
         const onClick = () => open({ kind: 'confirm', action: 'remove', name: entry.name })
@@ -600,10 +604,9 @@ window.__ModuleLoader__.load({
           const rowId = entry.id || entry.name
           return h(AccountCard, {
             key: rowId,
-            rowId,
             entry,
             thresholds,
-            busy: busy === rowId,
+            busy,
             open: props.open,
           })
         })
@@ -626,7 +629,25 @@ window.__ModuleLoader__.load({
           h('button', { className: 'th-btn', onClick: props.onCollapse }, t.collapse),
         ),
         body,
-        toast ? h('div', { className: 'th-toast ' + toast.kind }, toast.text) : null,
+        toast
+          ? h(
+              'div',
+              { className: 'th-toast ' + toast.kind },
+              h('span', null, toast.text),
+              toast.sticky
+                ? h(
+                    'button',
+                    {
+                      className: 'th-toast-close',
+                      title: t.close,
+                      'aria-label': t.close,
+                      onClick: props.onDismissToast,
+                    },
+                    '×',
+                  )
+                : null,
+            )
+          : null,
       )
     }
 
@@ -635,7 +656,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false)
       const [data, setData] = React.useState(null)
       const [failed, setFailed] = React.useState(false)
-      const [busy, setBusy] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
       const [toast, setToast] = React.useState(null)
       const [dialog, setDialog] = React.useState(null)
 
@@ -663,7 +684,9 @@ window.__ModuleLoader__.load({
       }, [])
 
       React.useEffect(() => {
-        if (!toast) return undefined
+        // Warnings stay until the next operation or an explicit close; only
+        // ordinary success/info toasts use the short dismissal.
+        if (!toast || toast.sticky) return undefined
         const id = setTimeout(() => setToast(null), 4500)
         return () => clearTimeout(id)
       }, [toast])
@@ -679,26 +702,39 @@ window.__ModuleLoader__.load({
         return () => root.style.removeProperty('--th-scale')
       }, [data])
 
-      const say = (kind, text) => setToast({ kind, text })
+      const say = (kind, text, sticky) => setToast({ kind, text, sticky: sticky === true })
+
+      /** The warning text a result carries, if any. */
+      const warningsOf = (res) =>
+        res && Array.isArray(res.warnings)
+          ? res.warnings.map((warning) => warning && warning.message).filter(Boolean).join('；')
+          : ''
 
       /**
-       * Run one mutation for a row: busy marker, one message, then a forced
-       * reload. kindOf lets the caller downgrade a technically-successful result
-       * that still carries a failure worth seeing.
+       * Run one mutation: one global busy flag, one message, then a forced
+       * reload. A partial success with warnings is shown as a persistent
+       * warning, not as a plain success toast.
        */
-      const run = (rowId, path, body, kindOf) => {
-        setBusy(rowId)
+      const run = (path, body, kindOf) => {
+        setToast(null)
+        setBusy(true)
         post(path, body).then((res) => {
-          setBusy(null)
-          if (res && res.ok) say(kindOf ? kindOf(res) : 'ok', res.message || t.ok)
-          else say('err', (res && res.error) || t.hostError)
+          setBusy(false)
+          const warnings = warningsOf(res)
+          if (res && res.ok) {
+            if (warnings) say('warn', warnings, true)
+            else say(kindOf ? kindOf(res) : 'ok', res.message || t.ok)
+          } else {
+            const text = [res && res.error, warnings].filter(Boolean).join('；')
+            say('err', text || t.hostError)
+          }
           load(true)
         })
       }
 
       const runSwitch = (name) =>
-        run(name, SWITCH, { name }, (res) => (res.opencodeAuth && res.opencodeAuth.ok === false ? 'err' : 'ok'))
-      const runRemove = (name) => run(name, ACCOUNT, { op: 'remove', name })
+        run(SWITCH, { name }, (res) => (res.opencodeAuth && res.opencodeAuth.ok === false ? 'err' : 'ok'))
+      const runRemove = (name) => run(ACCOUNT, { op: 'remove', name })
 
       const thresholds = (data && data.thresholds) || FALLBACK_THRESHOLDS
       const entries = (data && data.entries) || []
@@ -707,10 +743,13 @@ window.__ModuleLoader__.load({
       // rather than three calm ones.
       const bars = barShape(failed ? [] : entries, thresholds)
 
-      const openDialog = (next) => setDialog(next)
+      const openDialog = (next) => {
+        setToast(null)
+        setDialog(next)
+      }
       const addButton = h(
         'button',
-        { className: 'th-btn', style: { marginTop: '8px' }, onClick: () => openDialog({ kind: 'add' }) },
+        { className: 'th-btn', style: { marginTop: '8px' }, disabled: busy, onClick: () => openDialog({ kind: 'add' }) },
         t.add,
       )
 
@@ -773,6 +812,7 @@ window.__ModuleLoader__.load({
               open: openDialog,
               onRefresh: () => load(true),
               onCollapse: () => setOpen(false),
+              onDismissToast: () => setToast(null),
             })
           : null,
         modal,

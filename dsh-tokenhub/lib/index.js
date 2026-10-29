@@ -760,6 +760,29 @@ function createHub(ctx, options) {
     return { ok: true, name: value }
   }
 
+  /** One mutation outcome shape: old fields survive, warnings are additive. */
+  const succeed = (fields) => Object.assign({ ok: true, message: '', error: null, warnings: [] }, fields || {})
+  const fail = (error, fields) => Object.assign({ ok: false, message: '', error, warnings: [] }, fields || {})
+
+  /**
+   * Run one account mutation after every earlier one. Reads, conflict checks,
+   * writes, and read-backs all happen inside the same turn, so two callers
+   * cannot both pass a "free name" check. The tail swallows only the queue's
+   * own rejection bookkeeping; the caller still receives the operation's
+   * result or its exception.
+   */
+  let mutationTail = Promise.resolve()
+  function enqueueMutation(operation) {
+    const result = mutationTail.then(operation)
+    mutationTail = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Read the value back and report whether it equals the expected one. */
+  async function readBack(ref, expected) {
+    return (await resolveRef(ref)) === expected
+  }
+
   /**
    * Rebuild the cache. Concurrent callers share one in-flight pass, so a poll
    * and a widget refresh never double-spend the endpoint.
@@ -820,60 +843,69 @@ function createHub(ctx, options) {
    * adapter resolves, read it back, then mirror into opencode's auth.json.
    */
   async function switchTo(targetName) {
-    const next = await resolveRef(POOL_PREFIX + targetName)
-    if (!next) return { ok: false, error: '账号「' + targetName + '」不存在或密钥为空' }
+    const named = validatePoolName(targetName)
+    if (!named.ok) return fail(named.error)
+    const target = named.name
 
-    // A read-only source shadows the reference: the write would report success
-    // while resolution kept returning the shadowing value.
-    const info = await describeRef(REF_CURRENT)
-    if (info && info.writable === false) {
-      return {
-        ok: false,
-        error: '当前密钥由启动环境提供（只读），无法切换：请先清除环境变量 ' + REF_CURRENT,
+    const outcome = await enqueueMutation(async () => {
+      const next = await resolveRef(POOL_PREFIX + target)
+      if (!next) return fail('账号「' + target + '」不存在或密钥为空')
+
+      // A read-only source shadows the reference: the write would report success
+      // while resolution kept returning the shadowing value.
+      const info = await describeRef(REF_CURRENT)
+      if (info && info.writable === false) {
+        return fail('当前密钥由启动环境提供（只读），无法切换：请先清除环境变量 ' + REF_CURRENT)
       }
-    }
 
-    const previous = await readCurrent()
-    const write = await writeCredential(() => ctx.credentials.set(REF_CURRENT, next))
-    if (!write.ok) return { ok: false, error: write.error }
+      const previous = await readCurrent()
+      const write = await writeCredential(() => ctx.credentials.set(REF_CURRENT, next))
+      if (!write.ok) return fail(write.error)
 
-    // Resolution is per call, so reading back is the authoritative check.
-    if ((await readCurrent()) !== next) {
-      let rolled = false
-      if (previous !== null) {
-        const undo = await writeCredential(() => ctx.credentials.set(REF_CURRENT, previous))
-        rolled = undo.ok
+      // Resolution is per call, so reading back is the authoritative check.
+      if (!(await readBack(REF_CURRENT, next))) {
+        let restored = false
+        if (previous !== null) {
+          const undo = await writeCredential(() => ctx.credentials.set(REF_CURRENT, previous))
+          // Only a read-back may call the rollback restored.
+          restored = undo.ok && (await readBack(REF_CURRENT, previous))
+        }
+        return fail(restored ? '读回校验失败，已恢复原账号' : '读回校验失败，状态待确认')
       }
-      return {
-        ok: false,
-        error: rolled ? '读回校验失败，已恢复原账号' : '读回校验失败，状态待确认',
-      }
-    }
 
-    const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, targetName))
-    const repaired = write.releasedLock || marker.releasedLock || null
-    const authSync = syncAuth
-      ? Object.assign({ enabled: true }, syncOpencodeAuth(next, authPath))
-      : { enabled: false, ok: true, message: '未启用同步' }
+      const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, target))
+      const repaired = write.releasedLock || marker.releasedLock || null
+      const authSync = syncAuth
+        ? Object.assign({ enabled: true }, syncOpencodeAuth(next, authPath))
+        : { enabled: false, ok: true, message: '未启用同步' }
 
-    // Say which half applies when, because they differ: dsh is already live,
-    // opencode reads its file only at startup. A marker failure is a warning:
-    // the switch itself was read back and is in force.
-    const markerNote = marker.ok ? '' : '；「使用中」标记写入失败：' + marker.error
-    const authNote = !syncAuth
-      ? ''
-      : authSync.ok
-        ? '；opencode 认证文件已同步，但 opencode 需重启后才读取'
-        : '；opencode 同步失败：' + authSync.message
+      const warnings = []
+      if (!marker.ok) warnings.push({ code: 'active-marker', message: '「使用中」标记写入失败：' + marker.error })
+      if (syncAuth && !authSync.ok) warnings.push({ code: 'opencode-auth', message: 'opencode 同步失败：' + authSync.message })
 
-    await refresh()
-    return {
-      ok: true,
-      name: targetName,
-      message: '已切换到「' + targetName + '」，下一个请求即生效' + markerNote + authNote + lockNote(repaired),
-      activeMarker: marker.ok ? 'ok' : 'failed',
-      opencodeAuth: authSync,
-    }
+      // Say which half applies when, because they differ: dsh is already live,
+      // opencode reads its file only at startup. Auxiliary failures are warnings:
+      // the switch itself was read back and is in force.
+      const markerNote = marker.ok ? '' : '；「使用中」标记写入失败：' + marker.error
+      const authNote = !syncAuth
+        ? ''
+        : authSync.ok
+          ? '；opencode 认证文件已同步，但 opencode 需重启后才读取'
+          : '；opencode 同步失败：' + authSync.message
+
+      return succeed({
+        name: target,
+        message: '已切换到「' + target + '」，下一个请求即生效' + markerNote + authNote + lockNote(repaired),
+        activeMarker: marker.ok ? 'ok' : 'failed',
+        opencodeAuth: authSync,
+        warnings,
+      })
+    })
+
+    // The usage refresh is deliberately outside the write queue: a slow endpoint
+    // must not hold the next account change.
+    if (outcome.ok) await refresh()
+    return outcome
   }
 
   /**
@@ -884,37 +916,53 @@ function createHub(ctx, options) {
   async function addAccount(rawName, rawKey) {
     const key = typeof rawKey === 'string' ? rawKey.trim() : ''
     const requested = typeof rawName === 'string' ? rawName.trim() : ''
-    let target
+    let requestedName = null
     if (requested.length > 0) {
       const named = validatePoolName(requested)
-      if (!named.ok) return named
-      target = named.name
-    } else {
-      target = await nextDefaultName()
+      if (!named.ok) return fail(named.error)
+      requestedName = named.name
+      // Fast refusal; the authoritative check runs again inside the queue.
+      if (await isConfigured(POOL_PREFIX + requestedName)) {
+        return fail('账号「' + requestedName + '」已存在')
+      }
     }
     if (!KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
-      return { ok: false, error: '密钥需以 sk- 或 oc_sk_ 开头' }
+      return fail('密钥需以 sk- 或 oc_sk_ 开头')
     }
 
-    const ref = POOL_PREFIX + target
-    if (await isConfigured(ref)) return { ok: false, error: '账号「' + target + '」已存在' }
-
+    // Remote validation is outside the queue: it may be slow and must not block
+    // an unrelated rename or switch.
     const probe = await fetchUsage(key, baseUrl, timeoutMs)
     if (probe.error) {
-      return { ok: false, error: '密钥校验失败：' + describeError(probe.error, probe.detail) }
+      return fail('密钥校验失败：' + describeError(probe.error, probe.detail))
     }
     if (!hasUsableWindow(probe.windows)) {
-      return { ok: false, error: '接口数据不可用：该密钥没有返回任何可用额度窗口' }
+      return fail('接口数据不可用：该密钥没有返回任何可用额度窗口')
     }
 
-    const write = await writeCredential(() => ctx.credentials.set(ref, key))
-    if (!write.ok) return { ok: false, error: write.error }
-    await refresh()
-    return {
-      ok: true,
-      name: target,
-      message: '已添加账号「' + target + '」' + lockNote(write.releasedLock),
-    }
+    const outcome = await enqueueMutation(async () => {
+      // Default naming is inside the queue too: two blank-name adds must not
+      // hand out the same goN.
+      const target = requestedName !== null ? requestedName : await nextDefaultName()
+      const ref = POOL_PREFIX + target
+      if (await isConfigured(ref)) return fail('账号「' + target + '」已存在')
+
+      const write = await writeCredential(() => ctx.credentials.set(ref, key))
+      if (!write.ok) return fail(write.error)
+
+      if (!(await readBack(ref, key))) {
+        const undo = await writeCredential(() => ctx.credentials.unset(ref))
+        const cleared = undo.ok && (await resolveRef(ref)) === null
+        return fail(cleared ? '写入后读回校验失败，已撤销本次写入' : '写入后读回校验失败，状态待确认')
+      }
+      return succeed({
+        name: target,
+        message: '已添加账号「' + target + '」' + lockNote(write.releasedLock),
+      })
+    })
+
+    if (outcome.ok) await refresh()
+    return outcome
   }
 
   /**
@@ -925,28 +973,44 @@ function createHub(ctx, options) {
    */
   async function joinPool(rawName) {
     const named = validatePoolName(rawName)
-    if (!named.ok) return named
+    if (!named.ok) return fail(named.error)
     const target = named.name
 
-    const current = await readCurrent()
-    if (current === null) return { ok: false, error: '当前没有生效的密钥可入池' }
-    const pool = await resolvePool()
-    if (pool.some((entry) => entry.name === target)) {
-      return { ok: false, error: '账号「' + target + '」已存在' }
-    }
-    if (pool.some((entry) => entry.key === current)) {
-      return { ok: false, error: '当前密钥已经在账号池中' }
-    }
+    const outcome = await enqueueMutation(async () => {
+      const current = await readCurrent()
+      if (current === null) return fail('当前没有生效的密钥可入池')
+      // The pool scan may be narrower than the store (explicit keyNames), so
+      // describe is the authoritative conflict check.
+      if (await isConfigured(POOL_PREFIX + target)) return fail('账号「' + target + '」已存在')
+      const pool = await resolvePool()
+      if (pool.some((entry) => entry.key === current)) {
+        return fail('当前密钥已经在账号池中')
+      }
 
-    const write = await writeCredential(() => ctx.credentials.set(POOL_PREFIX + target, current))
-    if (!write.ok) return { ok: false, error: write.error }
-    const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, target))
-    await refresh()
-    return {
-      ok: true,
-      name: target,
-      message: '已把当前密钥归入账号池：「' + target + '」' + lockNote(write.releasedLock || marker.releasedLock),
-    }
+      const ref = POOL_PREFIX + target
+      const write = await writeCredential(() => ctx.credentials.set(ref, current))
+      if (!write.ok) return fail(write.error)
+      if (!(await readBack(ref, current))) {
+        const undo = await writeCredential(() => ctx.credentials.unset(ref))
+        const cleared = undo.ok && (await resolveRef(ref)) === null
+        return fail(cleared ? '入池后读回校验失败，已撤销本次写入' : '入池后读回校验失败，状态待确认')
+      }
+
+      const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, target))
+      const warnings = []
+      if (!marker.ok) warnings.push({ code: 'active-marker', message: '「使用中」标记写入失败：' + marker.error })
+      return succeed({
+        name: target,
+        message:
+          '已把当前密钥归入账号池：「' + target + '」' +
+          (marker.ok ? '' : '；「使用中」标记写入失败：' + marker.error) +
+          lockNote(write.releasedLock || marker.releasedLock),
+        warnings,
+      })
+    })
+
+    if (outcome.ok) await refresh()
+    return outcome
   }
 
   /**
@@ -957,41 +1021,60 @@ function createHub(ctx, options) {
    */
   async function renameAccount(rawFrom, rawTo) {
     const source = validatePoolName(rawFrom)
-    if (!source.ok) return source
+    if (!source.ok) return fail(source.error)
     const destination = validatePoolName(rawTo)
-    if (!destination.ok) return destination
+    if (!destination.ok) return fail(destination.error)
     const from = source.name
     const to = destination.name
-    if (from === to) return { ok: true, name: to, message: '名称未变化' }
+    if (from === to) return succeed({ name: to, message: '名称未变化' })
 
-    const pool = await resolvePool()
-    const entry = pool.find((item) => item.name === from)
-    if (!entry) return { ok: false, error: '账号「' + from + '」不存在' }
-    if (pool.some((item) => item.name === to)) {
-      return { ok: false, error: '账号「' + to + '」已存在' }
-    }
+    const outcome = await enqueueMutation(async () => {
+      const pool = await resolvePool()
+      const entry = pool.find((item) => item.name === from)
+      if (!entry) return fail('账号「' + from + '」不存在')
+      // describe sees targets the scan may not list (explicit keyNames files).
+      if (await isConfigured(POOL_PREFIX + to)) return fail('账号「' + to + '」已存在')
 
-    const write = await writeCredential(() => ctx.credentials.set(POOL_PREFIX + to, entry.key))
-    if (!write.ok) return { ok: false, error: write.error }
+      const targetRef = POOL_PREFIX + to
+      const write = await writeCredential(() => ctx.credentials.set(targetRef, entry.key))
+      if (!write.ok) return fail(write.error)
+      if (!(await readBack(targetRef, entry.key))) {
+        const undo = await writeCredential(() => ctx.credentials.unset(targetRef))
+        const cleared = undo.ok && (await resolveRef(targetRef)) === null
+        return fail(cleared ? '新名写入后读回校验失败，已撤销写入' : '新名写入后读回校验失败，状态待确认')
+      }
 
-    // The marker names the entry in force, so it has to follow the rename or the
-    // panel would lose track of which row is active.
-    let markerNote = ''
-    if ((await readDeclaredActive()) === from) {
-      const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, to))
-      if (!marker.ok) markerNote = '；「使用中」标记未能更新，请手动切换一次'
-    }
+      // The marker names the entry in force, so it has to follow the rename or
+      // the panel would lose track of which row is active.
+      const warnings = []
+      let markerNote = ''
+      if ((await readDeclaredActive()) === from) {
+        const marker = await writeCredential(() => ctx.credentials.set(REF_ACTIVE, to))
+        if (!marker.ok) {
+          markerNote = '；「使用中」标记未能更新，请手动切换一次'
+          warnings.push({ code: 'active-marker', message: '「使用中」标记未能更新：' + marker.error })
+        }
+      }
 
-    const drop = await writeCredential(() => ctx.credentials.unset(POOL_PREFIX + from))
-    await refresh()
-    if (!drop.ok) {
-      return { ok: false, error: '新名已写入，但旧名未能删除：' + drop.error }
-    }
-    return {
-      ok: true,
-      name: to,
-      message: '已把「' + from + '」改名为「' + to + '」' + markerNote + lockNote(write.releasedLock),
-    }
+      const drop = await writeCredential(() => ctx.credentials.unset(POOL_PREFIX + from))
+      if (!drop.ok) {
+        // The key is reachable under the new name, but both names now exist.
+        const message = '新名已写入，但旧名未能删除：' + drop.error
+        return fail(message, {
+          warnings: warnings.concat([{ code: 'partial-rename', message }]),
+          name: to,
+          partial: true,
+        })
+      }
+      return succeed({
+        name: to,
+        message: '已把「' + from + '」改名为「' + to + '」' + markerNote + lockNote(write.releasedLock),
+        warnings,
+      })
+    })
+
+    if (outcome.ok) await refresh()
+    return outcome
   }
 
   /**
@@ -1000,21 +1083,28 @@ function createHub(ctx, options) {
    */
   async function removeAccount(rawName) {
     const named = validatePoolName(rawName)
-    if (!named.ok) return named
+    if (!named.ok) return fail(named.error)
     const target = named.name
 
-    const pool = await resolvePool()
-    const entry = pool.find((item) => item.name === target)
-    if (!entry) return { ok: false, error: '账号「' + target + '」不存在' }
-    const current = await readCurrent()
-    if (current !== null && entry.key === current) {
-      return { ok: false, error: '使用中的账号不能删除，请先切换到其他账号' }
-    }
+    const outcome = await enqueueMutation(async () => {
+      const pool = await resolvePool()
+      const entry = pool.find((item) => item.name === target)
+      if (!entry) return fail('账号「' + target + '」不存在')
+      // Read the current key after earlier queued writes, not before them.
+      const current = await readCurrent()
+      if (current !== null && entry.key === current) {
+        return fail('使用中的账号不能删除，请先切换到其他账号')
+      }
 
-    const write = await writeCredential(() => ctx.credentials.unset(POOL_PREFIX + target))
-    if (!write.ok) return { ok: false, error: write.error }
-    await refresh()
-    return { ok: true, name: target, message: '已删除账号「' + target + '」' }
+      const ref = POOL_PREFIX + target
+      const write = await writeCredential(() => ctx.credentials.unset(ref))
+      if (!write.ok) return fail(write.error)
+      if ((await resolveRef(ref)) !== null) return fail('删除后读回校验失败，状态待确认')
+      return succeed({ name: target, message: '已删除账号「' + target + '」' })
+    })
+
+    if (outcome.ok) await refresh()
+    return outcome
   }
 
   return { refresh, snapshot, switchTo, addAccount, joinPool, renameAccount, removeAccount }
