@@ -490,6 +490,46 @@ try {
   )
   globalThis.fetch = liveFetch
 
+  // ================= an older snapshot response cannot overwrite a newer one =================
+  {
+    const deferred = []
+    const liveFetch = globalThis.fetch
+    globalThis.fetch = (url) => {
+      if (String(url).indexOf('/snapshot') !== -1) {
+        return new Promise((resolve) => {
+          deferred.push((payload) => resolve({ ok: true, status: 200, async json() { return payload } }))
+        })
+      }
+      return liveFetch(url)
+    }
+    const host11 = await mount()
+    await click(q(host11, '.th-gauge'))
+    await click(byText(host11, 'button', '\u5237\u65b0'))
+    check('two snapshot requests can overlap', deferred.length === 2, String(deferred.length))
+    const newer = {
+      updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
+      entries: [poolRow('newer', true, { rolling: win(1, 1), weekly: win(2, 2), monthly: win(3, 3) })],
+    }
+    const older = {
+      updatedAt: NOW - 1000, error: null, thresholds: { warn: 60, error: 85 },
+      entries: [poolRow('older', true, { rolling: win(9, 1), weekly: win(9, 2), monthly: win(9, 3) })],
+    }
+    await act(async () => {
+      deferred[1](newer)
+      await new Promise((r) => setTimeout(r, 10))
+    })
+    await act(async () => {
+      deferred[0](older)
+      await new Promise((r) => setTimeout(r, 20))
+    })
+    check(
+      'a late older response does not replace the newer snapshot',
+      txt(host11).indexOf('newer') !== -1 && txt(host11).indexOf('older') === -1,
+      txt(host11).slice(0, 120),
+    )
+    globalThis.fetch = liveFetch
+  }
+
   // ================= English dictionary =================
   // Re-execute the bundle so its factory picks the other language.
   Object.defineProperty(dom.window.navigator, 'language', { value: 'en-US', configurable: true })

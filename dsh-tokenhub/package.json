@@ -32,7 +32,7 @@
     "install.ps1"
   ],
   "scripts": {
-    "test": "node test/host.test.mjs && node test/client.test.mjs",
+    "test": "node test/host.test.mjs && node test/client.test.mjs && node test/usage-contract.test.mjs && node test/account-concurrency.test.mjs && node test/snapshot.test.mjs",
     "test:host": "node test/host.test.mjs",
     "test:client": "node test/client.test.mjs"
   },

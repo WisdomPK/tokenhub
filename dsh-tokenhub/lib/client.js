@@ -659,15 +659,26 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [toast, setToast] = React.useState(null)
       const [dialog, setDialog] = React.useState(null)
+      // Only the newest snapshot request may update state; an older response
+      // that arrives late is dropped instead of replacing a newer identity.
+      const loadSeq = React.useRef(0)
+      const mounted = React.useRef(true)
+      React.useEffect(() => () => { mounted.current = false }, [])
 
       const load = React.useCallback((force) => {
+        const seq = loadSeq.current + 1
+        loadSeq.current = seq
         fetch(SNAPSHOT + (force ? '?force=1' : ''), { headers: { Accept: 'application/json' } })
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error('HTTP ' + res.status))))
           .then((payload) => {
+            if (!mounted.current || seq !== loadSeq.current) return
             setData(payload)
             setFailed(false)
           })
-          .catch(() => setFailed(true))
+          .catch(() => {
+            if (!mounted.current || seq !== loadSeq.current) return
+            setFailed(true)
+          })
       }, [])
 
       React.useEffect(() => {

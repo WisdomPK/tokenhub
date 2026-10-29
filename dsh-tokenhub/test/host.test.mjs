@@ -533,6 +533,65 @@ lc = lockingCtx(() => new Error('EACCES: permission denied, open the credentials
 lr = (await addGo7(lc.ctx)).body
 check('an unrelated write failure is surfaced verbatim', lr.ok === false && /EACCES/.test(lr.error || ''), lr.error)
 
+// ---- storage failures are not an empty pool ----
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  st.refs.set('OPENCODE_GO_KEY_go1', KEY_A)
+  const realResolve = st.resolve.bind(st)
+  st.resolve = async (ref) => {
+    if (ref === 'OPENCODE_GO_API_KEY') throw new Error('disk read failed')
+    return realResolve(ref)
+  }
+  const c = makeCtx(st)
+  const originalError = console.error
+  const logs = []
+  console.error = (...args) => logs.push(args.map(String).join(' '))
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: ['go1'] })
+  await settle()
+  const failedSnap = (await request(c, SNAP, { force: true })).body
+  check(
+    'a storage read failure is an internal snapshot error, not no-keys',
+    /^internal:/.test(failedSnap.error || '') && failedSnap.error !== 'no-keys',
+    String(failedSnap.error),
+  )
+  check('the snapshot failure is logged', logs.some((line) => /snapshot refresh failed/.test(line)), logs.join(' | ').slice(0, 180))
+  const failedSwitch = await Promise.race([
+    request(c, SWITCH, { method: 'POST', body: { name: 'go1' } }),
+    new Promise((resolve) => setTimeout(() => resolve({ status: -2, body: { error: 'no response' } }), 500)),
+  ])
+  check(
+    'a mutation storage failure returns an explicit 500',
+    failedSwitch.status === 500 && /凭据存储读取失败/.test(failedSwitch.body.error || ''),
+    failedSwitch.status + ' ' + String(failedSwitch.body.error),
+  )
+  console.error = originalError
+}
+{
+  const st = makeStore()
+  st.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+  const realDescribe = st.describe.bind(st)
+  st.describe = async (ref) => {
+    if (ref === 'OPENCODE_GO_KEY_go9') throw new Error('describe EIO')
+    return realDescribe(ref)
+  }
+  const c = makeCtx(st)
+  const originalError = console.error
+  console.error = () => {}
+  apply(c, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false, keyNames: [] })
+  await settle()
+  const failedAdd = await Promise.race([
+    request(c, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'go9', key: KEY_A } }),
+    new Promise((resolve) => setTimeout(() => resolve({ status: -2, body: { error: 'no response' } }), 500)),
+  ])
+  console.error = originalError
+  check(
+    'a describe failure is not treated as an available name',
+    failedAdd.status === 500 && /凭据存储读取失败/.test(failedAdd.body.error || ''),
+    failedAdd.status + ' ' + String(failedAdd.body.error),
+  )
+}
+
 // ---- an explicit auth path is the only target ----
 // The review found the old resolver treating an explicit path as a candidate:
 // a missing or corrupt override silently moved the write to another file.
