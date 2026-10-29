@@ -661,6 +661,33 @@ try {
     globalThis.fetch = liveFetch
   }
 
+  // ================= a failed refresh without carried entries marks the old data stale =================
+  {
+    SNAPSHOT = {
+      updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
+      entries: [poolRow('cached', true, {
+        rolling: win(10, 1),
+        weekly: win(70, 120),
+        monthly: win(92, 480),
+      })],
+    }
+    const hostNetwork = await mount()
+    await click(q(hostNetwork, '.th-gauge'))
+    const liveFetch = globalThis.fetch
+    globalThis.fetch = async () => { throw new Error('network down') }
+    await click(byText(hostNetwork, 'button', '\u5237\u65b0'))
+    check('a failed refresh without entries shows the error banner', /快照拉取失败/.test(txt(hostNetwork)) && /network down/.test(txt(hostNetwork)), txt(hostNetwork).slice(0, 150))
+    check('the previous card is still visible after the failure', txt(hostNetwork).indexOf('cached') !== -1, txt(hostNetwork).slice(0, 150))
+    check(
+      'old data is rendered in the neutral stale band, never the live green band',
+      all(hostNetwork, '.th-gauge-fill').every((fill) => fill.className.indexOf('na') !== -1) &&
+        all(hostNetwork, '.th-gauge-fill').map((fill) => fill.style.width).join(',') === '10%,70%,92%',
+      all(hostNetwork, '.th-gauge-fill').map((fill) => fill.className + '@' + fill.style.width).join(','),
+    )
+    check('old data says when it was last read and why it is stale', /上次/.test(txt(hostNetwork)) && /network down/.test(txt(hostNetwork)), txt(hostNetwork).slice(0, 200))
+    globalThis.fetch = liveFetch
+  }
+
   // ================= 200 with invalid JSON is a failure, not permanent loading =================
   {
     const liveFetch = globalThis.fetch

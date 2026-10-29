@@ -270,6 +270,33 @@ window.__ModuleLoader__.load({
       return entry && entry.windows ? entry.windows[key] || null : null
     }
 
+    /**
+     * A snapshot request failed without carrying server-marked entries. Keep the
+     * old numbers for context, but stop presenting them as live readings: every
+     * window with a value becomes stale with the failure as its reason.
+     */
+    function markEntriesStale(entries, reason) {
+      const attemptedAt = Date.now()
+      return entries.map((entry) => {
+        if (!entry || !entry.windows) return entry
+        const windows = {}
+        for (const key of WINDOWS) {
+          const win = entry.windows[key]
+          if (!win) continue
+          if (typeof win.percent !== 'number' || win.stale === true) {
+            windows[key] = win
+            continue
+          }
+          windows[key] = Object.assign({}, win, {
+            stale: true,
+            error: reason,
+            lastAttemptAt: attemptedAt,
+          })
+        }
+        return Object.assign({}, entry, { windows })
+      })
+    }
+
     /** A reading as a bar width; no reading draws an empty bar, not a full one. */
     function clampPct(value) {
       return value === null ? 0 : Math.max(0, Math.min(100, value))
@@ -726,13 +753,28 @@ window.__ModuleLoader__.load({
               return
             }
             if (outcome.payload && Array.isArray(outcome.payload.entries) && outcome.payload.entries.length > 0) {
-              setData(outcome.payload)
+              setData(Object.assign({}, outcome.payload, {
+                entries: markEntriesStale(outcome.payload.entries, outcome.error),
+              }))
+            } else {
+              // No server-carried stale entries: keep the last successful view
+              // but re-label it, so nothing looks like a live green reading.
+              setData((previous) =>
+                previous && Array.isArray(previous.entries)
+                  ? Object.assign({}, previous, { entries: markEntriesStale(previous.entries, outcome.error) })
+                  : previous,
+              )
             }
             setFailed(outcome.error)
           })
           .catch((error) => {
             if (!mounted.current || seq !== loadSeq.current) return
             const message = String((error && error.message) || error)
+            setData((previous) =>
+              previous && Array.isArray(previous.entries)
+                ? Object.assign({}, previous, { entries: markEntriesStale(previous.entries, message || t.loadFailed) })
+                : previous,
+            )
             setFailed(message || t.loadFailed)
           })
       }, [])
