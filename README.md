@@ -72,9 +72,9 @@ dsh 插件位于 `dsh-tokenhub/`，仅在 dsh 分支提供；使用方式与桌�
 
 ## 测试与验证
 
-- Python：`python -m unittest discover -s tests -v`，245 项通过（桌面 API、认证文件、刷新状态、设置流程等）。
+- Python：`python -m unittest discover -s tests -v`，249 项通过（桌面 API、认证文件、刷新状态、设置流程等）。
 - 桌面插件：`node plugin/smoke_test.mjs`，PASS；覆盖认证路径显式覆盖、BOM、回滚与宿主 API 超时核对等，仅使用本地临时文件/回环 stub，不访问外网。
-- dsh 插件（dsh 分支）：在 `dsh-tokenhub` 下运行 `npm test`，共 372 项：host 128、client 116、usage-contract 65、account-concurrency 31、snapshot 32。
+- dsh 插件（dsh 分支）：在 `dsh-tokenhub` 下运行 `npm test`，共 398 项：host 151、client 116、usage-contract 68、account-concurrency 31、snapshot 32。
 - 上列为自动化结果；真实 opencode/dsh 宿主交互（真实切换、真实额度接口、多屏/DPI 等）需按宿主版本单独验收，不能由单测替代。
 
 ## FAQ
