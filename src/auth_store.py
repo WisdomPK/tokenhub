@@ -87,9 +87,13 @@ class AuthStore:
                 error = "认证文件读取失败（顶层不是 JSON 对象）"
             else:
                 entry = data.get("opencode-go")
-                if not isinstance(entry, dict):
+                if entry is None:
                     self.last_error = None
                     return (None, None)
+                if not isinstance(entry, dict):
+                    error = "认证文件读取失败（opencode-go 字段格式错误）"
+                    self.last_error = error
+                    return (None, error)
                 key = entry.get("key")
                 if isinstance(key, str) and key:
                     self.last_error = None

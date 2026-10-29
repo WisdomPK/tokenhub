@@ -794,6 +794,14 @@ class AuthStoreTests(unittest.TestCase):
             self.assertIsNone(store.current_key())
             self.assertIsNone(store.last_error)
 
+    def test_auth_current_key_malformed_field_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text(json.dumps({"opencode-go": "not-an-object"}), encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIn("字段格式错误", store.last_error)
+
     def test_auth_current_key_missing_file(self):
         with self._env():
             store = AuthStore()
