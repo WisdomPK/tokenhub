@@ -117,11 +117,14 @@ Writes are same-origin checked: a request carrying an Origin that does not match
 
 ```powershell
 npm install          # react / react-dom / jsdom, for the tests only
-npm test             # 26 host checks + 38 client checks
+npm test             # 128 host + 116 client + 65 usage-contract + 31 concurrency + 32 snapshot (372 checks)
 ```
 
 - test/host.test.mjs — an in-memory credential store plus a stubbed usage endpoint, covering pool discovery, active-account resolution, switch and rollback, add/remove validation, and the same-origin fence
 - test/client.test.mjs — mounts the widget with real React in jsdom, drives the clicks, and asserts the rendered percentages, threshold bands, countdowns, confirmations, and request bodies
+- test/usage-contract.test.mjs — shared percent and reset-time boundary cases from tests/fixtures/usage-contract.json
+- test/account-concurrency.test.mjs — serialized account mutations, conflict checks, partial success, and warnings
+- test/snapshot.test.mjs — revisioned batches, deduped keys, the concurrency cap, and stale windows
 
 ## Differences from TokenHub
 
