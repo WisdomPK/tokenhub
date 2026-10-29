@@ -223,6 +223,8 @@ class MainRefreshTests(unittest.TestCase):
         app._sticky_auto_text = None
         app._switch_pending_restart = False
         app._auth_external_changed = False
+        app._switching_inflight = False
+        app._last_auth_check = 0.0
         app.cfg = mock.Mock()
         app.cfg.accounts = list(accounts)
         app.cfg.find_by_key.side_effect = lambda key: next(
@@ -345,6 +347,18 @@ class MainRefreshTests(unittest.TestCase):
         app.store.last_error = "denied"
         with self.assertRaises(OSError):
             app._settings_current_key()
+
+    def test_poll_auth_surfaces_read_error(self):
+        app = self._app()
+        app.store = mock.Mock()
+        app.store.mtime.return_value = 2.0
+        app.store.current_key.return_value = None
+        app.store.last_error = "认证文件读取失败（denied）"
+        app._last_mtime = 1.0
+        app._last_auth_check = 0.0
+        app._poll_auth()
+        self.assertEqual(app._sticky_reason, "auth")
+        self.assertEqual(app._identity_state_text(), "认证文件读取失败")
 
     def test_update_ui_accounts_passes_views_and_keeps_old_backup(self):
         old = types.SimpleNamespace(key="old", label="旧账号")
