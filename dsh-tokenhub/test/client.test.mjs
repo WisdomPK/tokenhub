@@ -63,7 +63,7 @@ check('registered into shell.overlay', registered && registered.name === 'shell.
 const NOW = Date.now()
 const win = (percent, hours) => ({ status: 'ok', percent: percent, resetsAt: new Date(NOW + hours * 3600e3).toISOString() })
 const poolRow = (name, active, windows, extra) =>
-  Object.assign({ id: name, name: name, masked: 'sk-' + name.toUpperCase() + '\u2026zzzz', active: active, inPool: true, error: null, detail: null, windows: windows }, extra || {})
+  Object.assign({ id: 'pool:' + name, name: name, masked: 'sk-' + name.toUpperCase() + '\u2026zzzz', active: active, inPool: true, error: null, detail: null, windows: windows }, extra || {})
 
 // The account in force mixes the three bands on purpose: rolling calm, weekly
 // caution, monthly alarm.
@@ -220,6 +220,17 @@ try {
     entries: [poolRow('go1', false, { rolling: win(1, 1), weekly: win(2, 2), monthly: win(3, 3) })],
   }
   const host2 = await mount()
+  check(
+    'with no row in force the gauge shows unavailable, not the first spare',
+    all(host2, '.th-gauge-fill').map((f) => f.className.replace('th-gauge-fill ', '')).join(',') === 'na,na,na' &&
+      all(host2, '.th-gauge-fill').every((f) => f.style.width === '100%'),
+    all(host2, '.th-gauge-fill').map((f) => f.className + '@' + f.style.width).join(','),
+  )
+  check(
+    'and its tooltip says no key is in force',
+    (q(host2, '.th-gauge').title || '').indexOf('\u5f53\u524d\u6ca1\u6709\u751f\u6548\u7684\u5bc6\u94a5') !== -1,
+    q(host2, '.th-gauge').title,
+  )
   await click(q(host2, '.th-gauge'))
   check(
     'a snapshot with no scale leaves the widget at 1',
@@ -233,7 +244,7 @@ try {
   SNAPSHOT = {
     updatedAt: NOW, error: null, thresholds: { warn: 60, error: 85 },
     entries: [
-      { id: '__current__', name: '', masked: 'sk-XXXX\u2026XXX9', active: true, inPool: false, error: null, detail: null, windows: { rolling: win(3, 1), weekly: win(88, 120), monthly: win(1, 480) } },
+      { id: 'current', name: '', masked: 'sk-XXXX\u2026XXX9', active: true, inPool: false, error: null, detail: null, windows: { rolling: win(3, 1), weekly: win(88, 120), monthly: win(1, 480) } },
       poolRow('Google', false, { rolling: win(4, 1), weekly: win(5, 120), monthly: win(6, 480) }),
     ],
   }

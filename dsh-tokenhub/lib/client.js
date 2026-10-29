@@ -285,10 +285,10 @@ window.__ModuleLoader__.load({
       return WINDOWS.every((key) => pct(windowOf(entry, key)) === null)
     }
 
-    /** The account a summary describes: the one in force, else the first row. */
+    /** The account a summary describes: the one in force, never a spare. */
     function subjectOf(entries) {
       const actives = entries.filter((entry) => entry.active)
-      return actives.length > 0 ? actives[0] : entries[0]
+      return actives.length > 0 ? actives[0] : null
     }
 
     /**
@@ -302,6 +302,7 @@ window.__ModuleLoader__.load({
      */
     function barShape(entries, thresholds) {
       const source = subjectOf(entries)
+      if (source === null) return WINDOWS.map(() => ({ band: 'na', width: 100 }))
       return WINDOWS.map((key) => {
         const win = windowOf(source, key)
         const value = pct(win)
@@ -316,7 +317,7 @@ window.__ModuleLoader__.load({
      */
     function fabTooltip(entries) {
       const source = subjectOf(entries)
-      if (!source) return t.title
+      if (!source) return t.title + ' · ' + t.noActive
       const parts = WINDOWS.map((key) => {
         const value = pct(windowOf(source, key))
         return t.w[key] + ' ' + (value === null ? t.noData : Math.round(value) + '%')
@@ -534,17 +535,18 @@ window.__ModuleLoader__.load({
         }
       }
       if (!entry.active && inPool) {
-        const onClick = () => open({ kind: 'confirm', action: 'switch', name: rowId })
+        // Routes address accounts by name; the row id is only a React key.
+        const onClick = () => open({ kind: 'confirm', action: 'switch', name: entry.name })
         actions.push(h('button', { className: 'th-btn', key: 'switch', disabled: busy, onClick }, busy ? t.switching : t.switch))
       }
       // Renaming only changes the name a key is filed under, so it is safe on
       // the account in force as well as on a spare.
       if (inPool) {
-        const onClick = () => open({ kind: 'rename', from: rowId, current: entry.name })
+        const onClick = () => open({ kind: 'rename', from: entry.name, current: entry.name })
         actions.push(h('button', { className: 'th-btn', key: 'rename', onClick }, t.rename))
       }
       if (!entry.active && inPool) {
-        const onClick = () => open({ kind: 'confirm', action: 'remove', name: rowId })
+        const onClick = () => open({ kind: 'confirm', action: 'remove', name: entry.name })
         actions.push(h('button', { className: 'th-btn th-danger', key: 'remove', disabled: busy, onClick }, t.remove))
       }
 

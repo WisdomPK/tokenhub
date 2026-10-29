@@ -53,7 +53,7 @@ const POOL_PREFIX = 'OPENCODE_GO_KEY_'
 const REF_ACTIVE = 'OPENCODE_GO_KEY_ACTIVE'
 
 /** Row id for the key in force when no pool entry holds it. */
-const CURRENT_ROW_ID = '__current__'
+const CURRENT_ROW_ID = 'current'
 
 /** A user-supplied pool name; the joined reference must still be a legal one. */
 const POOL_NAME_PATTERN = /^[A-Za-z0-9_]{1,32}$/
@@ -75,6 +75,12 @@ const DEFAULT_THRESHOLDS = { warn: 60, error: 85 }
 
 /** Shown wherever a pool name fails POOL_NAME_PATTERN. */
 const MSG_BAD_NAME = '账号名只能是 1-32 位字母、数字或下划线'
+
+/** Names that already mean something in the credential store. */
+const RESERVED_NAMES = new Set(['ACTIVE'])
+
+/** Shown wherever a reserved name is requested. */
+const MSG_RESERVED_NAME = '「ACTIVE」是系统保留名称，不能作为账号名'
 
 /** Endpoint failure code to user-facing text. */
 const ERROR_TEXT = new Map([
@@ -662,16 +668,23 @@ function createHub(ctx, options) {
   }
 
   /**
-   * Which entry is in force. A declared name wins when it names a real entry;
-   * otherwise the entry whose value matches the current key wins, so a pool
-   * written by hand (no ACTIVE marker) still highlights the right row.
+   * Which pool name is in force.
+   *
+   * The resolved OPENCODE_GO_API_KEY is authoritative: a marker can never
+   * promote an entry holding another key. The marker only breaks a tie when
+   * several pool names point at the same live key; absent a matching marker,
+   * pool order decides. No current key means no active row at all.
+   * @returns the active pool name, or null when no pool entry holds the key.
    */
-  function isActive(entry, declared, current, poolNames) {
-    if (declared && declared.length > 0) {
-      if (declared === entry.name) return true
-      if (poolNames.includes(declared)) return false
+  function selectActiveName(pool, currentKey, declaredName) {
+    if (currentKey === null) return null
+    const matches = pool.filter((entry) => entry.key === currentKey)
+    if (matches.length === 0) return null
+    if (declaredName && declaredName.length > 0) {
+      const preferred = matches.find((entry) => entry.name === declaredName)
+      if (preferred) return preferred.name
     }
-    return current !== null && entry.key === current
+    return matches[0].name
   }
 
   /** One snapshot row: the key itself never appears, only its mask. */
@@ -688,10 +701,16 @@ function createHub(ctx, options) {
     }
   }
 
-  /** A user-supplied pool name, trimmed, or null when it is not one. */
-  function poolName(raw) {
+  /**
+   * Validate a user-supplied pool name once, for every entry point. Reserved
+   * names are rejected before any credential is touched.
+   * @returns {ok: true, name} or {ok: false, error}.
+   */
+  function validatePoolName(raw) {
     const value = typeof raw === 'string' ? raw.trim() : ''
-    return POOL_NAME_PATTERN.test(value) ? value : null
+    if (!POOL_NAME_PATTERN.test(value)) return { ok: false, error: MSG_BAD_NAME }
+    if (RESERVED_NAMES.has(value)) return { ok: false, error: MSG_RESERVED_NAME }
+    return { ok: true, name: value }
   }
 
   /**
@@ -705,14 +724,15 @@ function createHub(ctx, options) {
         const pool = await resolvePool()
         const current = await readCurrent()
         const declared = await readDeclaredActive()
-        const names = pool.map((entry) => entry.name)
+        const activeName = selectActiveName(pool, current, declared)
         const entries = []
 
         // The key in force always owns a row, whether or not a pool entry backs
         // it. It is what the next request uses, and it is the row carrying the
         // Add affordance — without it, filing the first pool entry would leave
-        // nothing marked in force and no way to add a second.
-        if (current !== null && !pool.some((entry) => entry.key === current)) {
+        // nothing marked in force and no way to add a second. When no pool entry
+        // holds the key, no pool row may claim to be in force.
+        if (current !== null && activeName === null) {
           const usage = await fetchUsage(current, baseUrl, timeoutMs)
           entries.push(rowOf(CURRENT_ROW_ID, '', current, usage, true, false))
         }
@@ -720,7 +740,7 @@ function createHub(ctx, options) {
         const backed = await Promise.all(
           pool.map(async (entry) => {
             const usage = await fetchUsage(entry.key, baseUrl, timeoutMs)
-            return rowOf(entry.name, entry.name, entry.key, usage, isActive(entry, declared, current, names), true)
+            return rowOf('pool:' + entry.name, entry.name, entry.key, usage, entry.name === activeName, true)
           }),
         )
         entries.push(...backed)
@@ -790,7 +810,9 @@ function createHub(ctx, options) {
       : { enabled: false, ok: true, message: '未启用同步' }
 
     // Say which half applies when, because they differ: dsh is already live,
-    // opencode reads its file only at startup.
+    // opencode reads its file only at startup. A marker failure is a warning:
+    // the switch itself was read back and is in force.
+    const markerNote = marker.ok ? '' : '；「使用中」标记写入失败：' + marker.error
     const authNote = !syncAuth
       ? ''
       : authSync.ok
@@ -801,7 +823,7 @@ function createHub(ctx, options) {
     return {
       ok: true,
       name: targetName,
-      message: '已切换到「' + targetName + '」，下一个请求即生效' + authNote + lockNote(repaired),
+      message: '已切换到「' + targetName + '」，下一个请求即生效' + markerNote + authNote + lockNote(repaired),
       activeMarker: marker.ok ? 'ok' : 'failed',
       opencodeAuth: authSync,
     }
@@ -815,8 +837,14 @@ function createHub(ctx, options) {
   async function addAccount(rawName, rawKey) {
     const key = typeof rawKey === 'string' ? rawKey.trim() : ''
     const requested = typeof rawName === 'string' ? rawName.trim() : ''
-    const target = requested.length > 0 ? requested : await nextDefaultName()
-    if (!POOL_NAME_PATTERN.test(target)) return { ok: false, error: MSG_BAD_NAME }
+    let target
+    if (requested.length > 0) {
+      const named = validatePoolName(requested)
+      if (!named.ok) return named
+      target = named.name
+    } else {
+      target = await nextDefaultName()
+    }
     if (!KEY_PREFIXES.some((prefix) => key.startsWith(prefix))) {
       return { ok: false, error: '密钥需以 sk- 或 oc_sk_ 开头' }
     }
@@ -846,8 +874,9 @@ function createHub(ctx, options) {
    * re-validation: it is the one already in use.
    */
   async function joinPool(rawName) {
-    const target = poolName(rawName)
-    if (target === null) return { ok: false, error: MSG_BAD_NAME }
+    const named = validatePoolName(rawName)
+    if (!named.ok) return named
+    const target = named.name
 
     const current = await readCurrent()
     if (current === null) return { ok: false, error: '当前没有生效的密钥可入池' }
@@ -877,11 +906,12 @@ function createHub(ctx, options) {
    * leaves the key reachable instead of losing it.
    */
   async function renameAccount(rawFrom, rawTo) {
-    const from = typeof rawFrom === 'string' ? rawFrom.trim() : ''
-    const to = typeof rawTo === 'string' ? rawTo.trim() : ''
-    if (!POOL_NAME_PATTERN.test(from) || !POOL_NAME_PATTERN.test(to)) {
-      return { ok: false, error: MSG_BAD_NAME }
-    }
+    const source = validatePoolName(rawFrom)
+    if (!source.ok) return source
+    const destination = validatePoolName(rawTo)
+    if (!destination.ok) return destination
+    const from = source.name
+    const to = destination.name
     if (from === to) return { ok: true, name: to, message: '名称未变化' }
 
     const pool = await resolvePool()
@@ -919,8 +949,9 @@ function createHub(ctx, options) {
    * it on every request.
    */
   async function removeAccount(rawName) {
-    const target = poolName(rawName)
-    if (target === null) return { ok: false, error: MSG_BAD_NAME }
+    const named = validatePoolName(rawName)
+    if (!named.ok) return named
+    const target = named.name
 
     const pool = await resolvePool()
     const entry = pool.find((item) => item.name === target)

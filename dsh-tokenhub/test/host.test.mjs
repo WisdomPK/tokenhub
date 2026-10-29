@@ -119,7 +119,7 @@ await settle()
 let snap = (await request(ctx, SNAP)).body
 check(
   'a lone key in force still shows as one row',
-  snap.entries.length === 1 && snap.entries[0].id === '__current__' && snap.entries[0].inPool === false && snap.entries[0].active === true,
+  snap.entries.length === 1 && snap.entries[0].id === 'current' && snap.entries[0].inPool === false && snap.entries[0].active === true,
 )
 check('entry is active', snap.entries[0].active === true)
 check('key is masked and never returned', snap.entries[0].masked === KEY_A.slice(0, 6) + '\u2026' + KEY_A.slice(-4) && !JSON.stringify(snap).includes(KEY_A))
@@ -138,15 +138,64 @@ apply(ctx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencode
 await settle()
 snap = (await request(ctx, SNAP)).body
 check('both pool entries found', snap.entries.length === 2 && snap.entries[0].name === 'go1' && snap.entries[1].name === 'go2')
+check(
+  'pool rows carry namespaced ids while names stay addressable',
+  snap.entries[0].id === 'pool:go1' && snap.entries[0].name === 'go1' && snap.entries[1].id === 'pool:go2',
+  JSON.stringify(snap.entries.map((e) => [e.id, e.name])),
+)
 check('active inferred from the key in force', snap.entries[1].active === true && snap.entries[0].active === false)
 check('the ACTIVE marker is not treated as an entry', snap.entries.every((e) => e.name !== 'ACTIVE'))
 
-// ---- a declared ACTIVE marker outranks the value match ----
+// ---- the key in force is authoritative; a stale marker cannot move it ----
 writeCreds({ go1: KEY_A, go2: KEY_B }, KEY_B, 'go1')
 store.refs.set('OPENCODE_GO_API_KEY', KEY_B)
 store.refs.set('OPENCODE_GO_KEY_ACTIVE', 'go1')
 snap = (await request(ctx, SNAP, { force: true })).body
-check('declared marker overrides the value match', snap.entries[0].active === true && snap.entries[1].active === false)
+check(
+  'the resolved key outranks a stale ACTIVE marker',
+  snap.entries[0].active === false && snap.entries[1].active === true,
+  JSON.stringify(snap.entries.map((e) => [e.name, e.active])),
+)
+check(
+  'only one pool row is marked in force',
+  snap.entries.filter((e) => e.active).length === 1,
+  String(snap.entries.filter((e) => e.active).length),
+)
+
+// ---- two pool names for one key: the marker picks which alias is displayed ----
+writeCreds({ go1: KEY_A, go2: KEY_A }, KEY_A, 'go2')
+const aliasStore = makeStore()
+aliasStore.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+aliasStore.refs.set('OPENCODE_GO_KEY_go1', KEY_A)
+aliasStore.refs.set('OPENCODE_GO_KEY_go2', KEY_A)
+aliasStore.refs.set('OPENCODE_GO_KEY_ACTIVE', 'go2')
+const aliasCtx = makeCtx(aliasStore)
+apply(aliasCtx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
+await settle()
+let aliasSnap = (await request(aliasCtx, SNAP, { force: true })).body
+check(
+  'aliases of one key: the marker chooses the displayed name',
+  aliasSnap.entries.filter((e) => e.name === 'go2' && e.active).length === 1 &&
+    aliasSnap.entries.filter((e) => e.name === 'go1' && e.active).length === 0,
+  JSON.stringify(aliasSnap.entries.map((e) => [e.name, e.active])),
+)
+check('a duplicated key still produces exactly one active row', aliasSnap.entries.filter((e) => e.active).length === 1)
+
+// ---- no key in force: nothing is marked active ----
+writeCreds({ go1: KEY_A, go2: KEY_B }, '', 'go1')
+const noCurrentStore = makeStore()
+noCurrentStore.refs.set('OPENCODE_GO_KEY_go1', KEY_A)
+noCurrentStore.refs.set('OPENCODE_GO_KEY_go2', KEY_B)
+noCurrentStore.refs.set('OPENCODE_GO_KEY_ACTIVE', 'go1')
+const noCurrentCtx = makeCtx(noCurrentStore)
+apply(noCurrentCtx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
+await settle()
+const noCurrentSnap = (await request(noCurrentCtx, SNAP, { force: true })).body
+check(
+  'with no key in force no row is active, even with a marker present',
+  noCurrentSnap.entries.length === 2 && noCurrentSnap.entries.every((e) => e.active === false),
+  JSON.stringify(noCurrentSnap.entries.map((e) => [e.name, e.active])),
+)
 
 // ---- switch ----
 writeFileSync(authPath, JSON.stringify({ 'opencode-go': { type: 'api', key: KEY_B }, other: { keep: 1 } }, null, 2), 'utf8')
@@ -165,6 +214,35 @@ check(
   sw.message,
 )
 check('snapshot reflects the switch', (await request(ctx, SNAP, { force: true })).body.entries[0].active === true)
+
+// ---- the switch itself is authoritative even when the marker write fails ----
+writeCreds({ go1: KEY_A, go2: KEY_B }, KEY_B, 'go2')
+const markerStore = makeStore()
+markerStore.refs.set('OPENCODE_GO_API_KEY', KEY_B)
+markerStore.refs.set('OPENCODE_GO_KEY_go1', KEY_A)
+markerStore.refs.set('OPENCODE_GO_KEY_go2', KEY_B)
+markerStore.refs.set('OPENCODE_GO_KEY_ACTIVE', 'go2')
+const realMarkerSet = markerStore.set.bind(markerStore)
+markerStore.set = async (ref, value) => {
+  if (ref === 'OPENCODE_GO_KEY_ACTIVE') throw new Error('EACCES: marker write denied')
+  return realMarkerSet(ref, value)
+}
+const markerCtx = makeCtx(markerStore)
+apply(markerCtx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
+await settle()
+const markerSwitch = (await request(markerCtx, SWITCH, { method: 'POST', body: { name: 'go1' } })).body
+check(
+  'a marker write failure does not undo a verified switch',
+  markerSwitch.ok === true && markerStore.refs.get('OPENCODE_GO_API_KEY') === KEY_A,
+  JSON.stringify(markerSwitch).slice(0, 180),
+)
+check('the marker failure is reported', /标记/.test(markerSwitch.message || ''), markerSwitch.message)
+const markerSnap = (await request(markerCtx, SNAP, { force: true })).body
+check(
+  'identity follows the resolved key, not the failed marker',
+  markerSnap.entries.filter((e) => e.active).length === 1 && markerSnap.entries.find((e) => e.active).name === 'go1',
+  JSON.stringify(markerSnap.entries.map((e) => [e.name, e.active])),
+)
 
 // ---- add ----
 check('rejects a malformed key', (await request(ctx, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'go9', key: 'nope' } })).body.ok === false)
@@ -207,6 +285,7 @@ writeCreds({ Google: KEY_B }, KEY_A, null)
 const s3 = makeStore()
 s3.refs.set('OPENCODE_GO_API_KEY', KEY_A)
 s3.refs.set('OPENCODE_GO_KEY_Google', KEY_B)
+s3.refs.set('OPENCODE_GO_KEY_ACTIVE', 'Google')
 const c3 = makeCtx(s3)
 apply(c3, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
 await settle()
@@ -216,11 +295,34 @@ check(
   snap3.entries.length === 2 && snap3.entries[0].active === true && snap3.entries[0].inPool === false,
   JSON.stringify(snap3.entries.map((e) => [e.name, e.active, e.inPool])),
 )
-check('that row carries an id for the client to key on', snap3.entries[0].id === '__current__')
+check('that row carries an id for the client to key on', snap3.entries[0].id === 'current')
 check('a row is in force, so Add stays reachable', snap3.entries.some((e) => e.active) === true)
 check(
-  'the pool entry is listed as a spare',
+  'the pool entry is listed as a spare even when a stale marker names it',
   snap3.entries[1].name === 'Google' && snap3.entries[1].active === false && snap3.entries[1].inPool === true,
+)
+check(
+  'a key outside the pool leaves exactly one active row',
+  snap3.entries.filter((e) => e.active).length === 1,
+  String(snap3.entries.filter((e) => e.active).length),
+)
+
+// ---- the old synthetic id is a legal pool name, not a collision ----
+writeCreds({ __current__: KEY_B }, KEY_A, null)
+const legacyStore = makeStore()
+legacyStore.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+legacyStore.refs.set('OPENCODE_GO_KEY___current__', KEY_B)
+const legacyCtx = makeCtx(legacyStore)
+apply(legacyCtx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
+await settle()
+const legacySnap = (await request(legacyCtx, SNAP, { force: true })).body
+check(
+  'a pool name __current__ survives beside the synthetic row',
+  legacySnap.entries.length === 2 &&
+    legacySnap.entries[0].id === 'current' &&
+    legacySnap.entries[1].id === 'pool:__current__' &&
+    legacySnap.entries[1].name === '__current__',
+  JSON.stringify(legacySnap.entries.map((e) => [e.id, e.name])),
 )
 
 // joining files the key in force, so a later switch cannot lose it
@@ -299,6 +401,27 @@ const badRename = (await request(cr, ACCOUNT, { method: 'POST', body: { op: 'ren
 check('rename refuses an unusable new name', badRename.ok === false)
 const sameRename = (await request(cr, ACCOUNT, { method: 'POST', body: { op: 'rename', name: 'backup', to: 'backup' } })).body
 check('renaming to the same name is a no-op', sameRename.ok === true && sr.refs.has('OPENCODE_GO_KEY_backup'))
+
+
+// ---- ACTIVE is system metadata, never an account name ----
+writeCreds({ go1: KEY_B }, KEY_A, null)
+const reservedStore = makeStore()
+reservedStore.refs.set('OPENCODE_GO_API_KEY', KEY_A)
+reservedStore.refs.set('OPENCODE_GO_KEY_go1', KEY_B)
+const reservedCtx = makeCtx(reservedStore)
+apply(reservedCtx, { credentialsPath: credPath, opencodeAuthPath: authPath, syncOpencodeAuth: false })
+await settle()
+const refsJson = () => JSON.stringify(Array.from(reservedStore.refs.entries()).sort())
+const reservedBefore = refsJson()
+const reservedAdd = (await request(reservedCtx, ACCOUNT, { method: 'POST', body: { op: 'add', name: 'ACTIVE', key: KEY_A } })).body
+check('add refuses the reserved name ACTIVE', reservedAdd.ok === false && /ACTIVE/.test(reservedAdd.error || ''), reservedAdd.error)
+check('a refused add leaves the credential store untouched', refsJson() === reservedBefore)
+const reservedJoin = (await request(reservedCtx, ACCOUNT, { method: 'POST', body: { op: 'joinPool', name: 'ACTIVE' } })).body
+check('joinPool refuses the reserved name ACTIVE', reservedJoin.ok === false && /ACTIVE/.test(reservedJoin.error || ''), reservedJoin.error)
+check('a refused joinPool leaves the credential store untouched', refsJson() === reservedBefore)
+const reservedRename = (await request(reservedCtx, ACCOUNT, { method: 'POST', body: { op: 'rename', name: 'go1', to: 'ACTIVE' } })).body
+check('rename refuses the reserved name ACTIVE', reservedRename.ok === false && /ACTIVE/.test(reservedRename.error || ''), reservedRename.error)
+check('a refused rename leaves the credential store untouched', refsJson() === reservedBefore)
 
 
 // ---- by default a dsh switch leaves opencode alone ----
