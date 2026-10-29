@@ -61,7 +61,7 @@ STICKY_AUTO_CHECK_SECONDS = 5.0  # U02：auto sticky 判定节流
 class TokenHubApp:
     TICK_MS = 100
     # U02：sticky 优先级 config > switch > tray > auto（高优先级占位时低优先级不替换）
-    STICKY_PRIORITY = {"config": 3, "switch": 2, "tray": 1, "auto": 0}
+    STICKY_PRIORITY = {"config": 3, "auth": 3, "switch": 2, "tray": 1, "auto": 0}
 
     def __init__(self):
         # 核心模块（按 plan Task A 规格）
@@ -105,7 +105,7 @@ class TokenHubApp:
 
         # 数据状态
         self.refresh_state = RefreshState()
-        self._last_fetch = 0.0
+        self._last_attempt = 0.0
         self._current_key: str | None = None
         self._last_mtime: float | None = None
         self._last_auth_check = 0.0
@@ -118,6 +118,7 @@ class TokenHubApp:
         # 运行时生效语义：本进程切换成功 → 待重启；外部 auth 变化 → 未确认
         self._switch_pending_restart = False
         self._auth_external_changed = False
+        self._auth_read_error: str | None = None
         # 可见状态统一：托盘手动显示/隐藏（手动显示后不随鼠标离开收起）
         self._manual_visible = False
         # TH-08c：倒计时归零去抖（key → 上次触发强制刷新时刻）
@@ -354,6 +355,9 @@ class TokenHubApp:
     def _refresh_once(self):
         keys = self._all_keys()
         if not keys:
+            # 无账号也要投递空结果：主线程据此清除旧视图/刷新失败 sticky
+            self._result_queue.put(
+                ("usage", (self.refresh_state.revision, {}, time.time())))
             return
         log_refresh_triggered()
         revision = self.refresh_state.revision
@@ -375,9 +379,18 @@ class TokenHubApp:
         # 后台线程只投递结果；成功时间/旧值保留由主线程 apply 统一提交
         self._result_queue.put(("usage", (revision, usages, attempted_at)))
 
+    def _data_success_at(self) -> float:
+        """所有已展示窗口中最新的“有效读数”时间；没有成功数据返回 0。"""
+        latest = 0.0
+        for row in self.refresh_state.views.values():
+            for view in row.values():
+                if view.last_success_at is not None and view.last_success_at > latest:
+                    latest = view.last_success_at
+        return latest
+
     def _maybe_refresh_now(self):
-        """数据超过 15s 旧 → 唤醒刷新线程立即刷新。"""
-        if time.time() - self._last_fetch >= STALE_REFRESH_SECONDS:
+        """成功数据超过 15s 旧 → 唤醒刷新线程；失败尝试不算成功时间。"""
+        if time.time() - self._data_success_at() >= STALE_REFRESH_SECONDS:
             self._refresh_event.set()
 
     def _force_refresh_now(self):
@@ -399,7 +412,7 @@ class TokenHubApp:
                 revision, usages, attempted_at = payload
                 if not self.refresh_state.apply(revision, usages, attempted_at):
                     continue  # 过期批次：不覆盖新身份/新状态
-                self._last_fetch = attempted_at
+                self._last_attempt = attempted_at
                 self._refresh_failed = self._all_accounts_failed(usages)
                 log_data_update(False)
                 self._update_ui_accounts()
@@ -441,6 +454,16 @@ class TokenHubApp:
             except Exception as e:
                 log_exception("clear_sticky", e)
 
+    def _clear_auth_sticky(self) -> None:
+        """读取恢复后清除 auth 类 sticky（不误清其他手动类提示）。"""
+        if self._sticky_reason == "auth":
+            self._sticky_reason = None
+            self._sticky_auto_text = None
+            try:
+                self.win.clear_transient()
+            except Exception as e:
+                log_exception("clear_auth_sticky", e)
+
     def _update_auto_sticky(self) -> None:
         """U02-auto：刷新失败或数据年龄 >120s → sticky info（点击重试/刷新）；5s 节流。"""
         now = time.time()
@@ -449,8 +472,10 @@ class TokenHubApp:
         self._last_auto_check = now
         if self._refresh_failed:
             self._set_sticky("auto", "刷新失败，显示上次数据 · 点击重试", "info")
-        elif now - self._last_fetch > STICKY_STALE_SECONDS:
-            self._set_sticky("auto", "数据较旧 · 点击刷新", "info")
+        else:
+            success_at = self._data_success_at()
+            if success_at and now - success_at > STICKY_STALE_SECONDS:
+                self._set_sticky("auto", "数据较旧 · 点击刷新", "info")
 
     # ------------------------------------------------------------- auth.json 监视
     def _poll_auth(self):
@@ -470,6 +495,20 @@ class TokenHubApp:
 
     def _reload_current_state(self):
         key = self.store.current_key()
+        error = getattr(self.store, "last_error", None)
+        if not isinstance(error, str):
+            error = None
+        if error:
+            # 读取异常不能伪装成“没有当前账号”；保留原 _current_key 与数据
+            self._auth_read_error = error
+            text = (error if error.startswith("认证文件读取失败")
+                    else f"认证文件读取失败：{error}")
+            self._set_sticky("auth", text, "error")
+            self._update_ui_accounts()
+            return
+        if getattr(self, "_auth_read_error", None) is not None:
+            self._auth_read_error = None
+            self._clear_auth_sticky()
         if key != self._current_key:
             self._current_key = key
             # 身份变化使在途刷新批次失效，并立即安排新账号的数据刷新
@@ -478,6 +517,7 @@ class TokenHubApp:
                 # R2-01：配置损坏保护——不自动写入账号池（避免覆盖损坏文件）
                 self.cfg.ensure_current_in_pool(key)
             self._force_refresh_now()
+            self._clear_refresh_state_if_unconfigured()
         self._update_ui_accounts()
 
     def _update_ui_accounts(self):
@@ -492,6 +532,8 @@ class TokenHubApp:
 
     def _identity_state_text(self) -> str:
         """区分“文件已配置”和“运行时已确认生效”；无宿主证据时不伪造。"""
+        if getattr(self, "_auth_read_error", None):
+            return "认证文件读取失败"
         if self._auth_external_changed:
             return "配置已变更，运行时账号未确认"
         if self._switch_pending_restart:
@@ -499,6 +541,16 @@ class TokenHubApp:
         if not self.cfg.accounts and not self._current_key:
             return "未配置"
         return "已配置"
+
+    def _clear_refresh_state_if_unconfigured(self) -> bool:
+        """无账号/无当前 key 时清除旧视图与 auto 刷新失败提示。"""
+        if self._all_keys():
+            return False
+        self._refresh_failed = False
+        self.refresh_state.apply(self.refresh_state.revision, {}, time.time())
+        if getattr(self, "_sticky_reason", None) == "auto":
+            self._clear_sticky()
+        return True
 
     def _usage_from_views(self, key: str) -> AccountUsage | None:
         """把窗口级视图合成为 FloatingWindow 消费的 AccountUsage（旧值也保留）。"""
@@ -696,7 +748,11 @@ class TokenHubApp:
             self.win.set_toast(msg, "error")
             return (False, msg)
         try:
-            self.cfg.remove_account(key)  # 变更即落盘；删除的是备用，不影响 ensure_current_in_pool
+            removed = self.cfg.remove_account(key)  # 变更即落盘；删除的是备用，不影响 ensure_current_in_pool
+            if not removed:
+                msg = "账号不存在"
+                self.win.set_toast(msg, "error")
+                return (False, msg)
         except ConfigWriteBlocked as e:
             # R2-01：写入被阻止（损坏保护等）——明确提示，不静默
             self.win.set_toast(f"删除失败：配置写入被阻止（{e}）", "error")
@@ -705,6 +761,7 @@ class TokenHubApp:
             log_exception("remove_account", e)
             return (False, str(e) or "删除失败")
         self.refresh_state.invalidate()
+        self._clear_refresh_state_if_unconfigured()
         self._update_ui_accounts()
         self._force_refresh_now()
         return (True, "")
@@ -718,7 +775,7 @@ class TokenHubApp:
                 self.theme.get_colors(),
                 api=self.api,
                 on_save=self._on_config_saved,
-                get_current_key=self.store.current_key,
+                get_current_key=self._settings_current_key,
             )
         except Exception as e:
             log_exception("settings", e)
@@ -734,6 +791,14 @@ class TokenHubApp:
         log_ui_action("exit")
         self._quit()
 
+    def _settings_current_key(self) -> str | None:
+        """设置窗口读取当前账号：读取异常向上抛出，避免被当作“未配置”。"""
+        key = self.store.current_key()
+        error = getattr(self.store, "last_error", None)
+        if isinstance(error, str) and error:
+            raise OSError(error)
+        return key
+
     def _on_config_saved(self):
         self.cfg.load()  # 设置窗口可能已修改配置 → 重新读取
         try:  # 主题热切换
@@ -743,6 +808,7 @@ class TokenHubApp:
             log_exception("theme", e)
         # 账号列表立即反映增删/改名，再强制刷新数据（不等 15s 节流/下轮轮询）
         self.refresh_state.invalidate()
+        self._clear_refresh_state_if_unconfigured()
         self._update_ui_accounts()
         self._force_refresh_now()
 

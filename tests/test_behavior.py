@@ -20,6 +20,19 @@ from floating_window import FloatingWindow  # noqa: E402
 from config import ConfigWriteBlocked  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
 from account_service import AccountService, SwitchResult  # noqa: E402
+from api import AccountUsage, UsageMetric  # noqa: E402
+
+
+def _ok_usage(key='k'):
+    return AccountUsage(
+        key, UsageMetric('ok', 10, None), UsageMetric('ok', 20, None),
+        UsageMetric('ok', 30, None), time.time())
+
+
+def _error_usage(key='k', error='网络错误'):
+    metric = UsageMetric('error', None, None, error)
+    return AccountUsage(key, metric, metric, metric, time.time(),
+                        account_error=error)
 
 
 def _bare_app() -> TokenHubApp:
@@ -31,7 +44,7 @@ def _bare_app() -> TokenHubApp:
     app._switch_gen = 0
     app._countdown_due_at = {}
     app.refresh_state = RefreshState()
-    app._last_fetch = time.time()
+    app._last_attempt = time.time()
     app._current_key = None
     app._manual_visible = False
     app._visible = False
@@ -57,8 +70,21 @@ class ForceRefreshTests(unittest.TestCase):
     def test_maybe_refresh_skips_when_data_fresh(self):
         """老化判定仍生效：数据新时 _maybe_refresh_now 不置位。"""
         app = _bare_app()
+        app._current_key = 'k'
+        app.refresh_state.apply(
+            app.refresh_state.revision, {'k': _ok_usage()}, time.time())
         app._maybe_refresh_now()
         self.assertFalse(app._refresh_event.is_set())
+
+    def test_maybe_refresh_retries_when_last_attempt_failed(self):
+        """失败尝试不算成功数据：无有效读数时展开仍应安排刷新。"""
+        app = _bare_app()
+        app._current_key = 'k'
+        app._last_attempt = time.time()
+        app.refresh_state.apply(
+            app.refresh_state.revision, {'k': _error_usage()}, time.time())
+        app._maybe_refresh_now()
+        self.assertTrue(app._refresh_event.is_set())
 
     def test_force_refresh_sets_event_even_when_fresh(self):
         """强制刷新不受 15s 过期条件限制（新增/删除账号、倒计时归零共用）。"""
@@ -822,6 +848,19 @@ class AccountCallbackTests(unittest.TestCase):
         self.assertIn('配置写入被阻止', result[1])
         app.win.set_toast.assert_called_once()
 
+    def test_delete_missing_account_returns_false(self):
+        """W6 fix：remove_account=False（键不存在）不得报告删除成功。"""
+        app = _bare_app()
+        app.cfg = mock.Mock()
+        app.cfg.remove_account.return_value = False
+        app.win = mock.Mock()
+        app.win.is_modal_open.return_value = False
+        app._current_key = 'key-a'
+        result = app.on_delete_account('key-b')
+        self.assertEqual(result, (False, "账号不存在"))
+        app.win.set_toast.assert_called_once_with("账号不存在", "error")
+        self.assertFalse(app._refresh_event.is_set())
+
 
 # ---------------------------------------------------------------------------
 # U02：sticky 提示编排（单槽优先级 config > switch > tray > auto）
@@ -883,7 +922,7 @@ class StickyToastTests(unittest.TestCase):
         app = self._app()
         app._last_auto_check = 0.0
         app._refresh_failed = True
-        app._last_fetch = time.time()
+        app._last_attempt = time.time()
         app._update_auto_sticky()
         self.assertEqual(app._sticky_reason, 'auto')
         app.win.set_toast.assert_called_once_with(
@@ -893,7 +932,9 @@ class StickyToastTests(unittest.TestCase):
         app = self._app()
         app._last_auto_check = 0.0
         app._refresh_failed = False
-        app._last_fetch = time.time() - 121  # 超过 120s
+        old = time.time() - 121
+        app.refresh_state.apply(app.refresh_state.revision, {'k': _ok_usage()}, old)
+        app._last_attempt = time.time()  # 最近的失败/尝试不得掩盖成功数据年龄
         app._update_auto_sticky()
         self.assertEqual(app._sticky_reason, 'auto')
         app.win.set_toast.assert_called_once_with(

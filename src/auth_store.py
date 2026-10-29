@@ -19,6 +19,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from logger import log_exception
+
 BACKUP_KEEP = 5
 BACKUP_SUFFIX = ".tokenhub.bak-"
 
@@ -27,6 +29,7 @@ class AuthStore:
     def __init__(self, path: str | None = None):
         """path 显式指定时忽略环境变量（供测试/集成使用）。"""
         self._explicit_path = path
+        self.last_error: str | None = None
 
     # ------------------------------------------------------------------ 路径
     def _candidates(self) -> list[str]:
@@ -64,18 +67,42 @@ class AuthStore:
         return candidates[0]
 
     # ------------------------------------------------------------------ 读取
-    def current_key(self) -> str | None:
+    def read_current_key(self) -> tuple[str | None, str | None]:
+        """读取当前 key，同时返回诊断信息。
+
+        (None, None) 表示文件/字段缺失（未配置）；
+        (None, message) 表示读取/解析异常，调用方不得当作未配置。
+        """
+        error = None
         try:
             with open(self.path(), "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
-            entry = data.get("opencode-go")
-            if isinstance(entry, dict):
+        except FileNotFoundError:
+            self.last_error = None
+            return (None, None)
+        except (OSError, ValueError) as e:
+            error = f"认证文件读取失败（{e}）"
+        else:
+            if not isinstance(data, dict):
+                error = "认证文件读取失败（顶层不是 JSON 对象）"
+            else:
+                entry = data.get("opencode-go")
+                if not isinstance(entry, dict):
+                    self.last_error = None
+                    return (None, None)
                 key = entry.get("key")
                 if isinstance(key, str) and key:
-                    return key
-            return None
-        except (OSError, ValueError):
-            return None
+                    self.last_error = None
+                    return (key, None)
+                self.last_error = None
+                return (None, None)
+        self.last_error = error
+        return (None, error)
+
+    def current_key(self) -> str | None:
+        """兼容接口：异常时返回 None，但 last_error 保留诊断。"""
+        key, _error = self.read_current_key()
+        return key
 
     def mtime(self) -> float:
         try:
@@ -93,7 +120,8 @@ class AuthStore:
         backup_path = f"{path}{BACKUP_SUFFIX}{stamp}"
         try:
             shutil.copy2(path, backup_path)
-        except OSError:
+        except OSError as e:
+            log_exception("auth_backup", e)
             return None
         self._prune_backups(path)
         return backup_path
@@ -101,13 +129,14 @@ class AuthStore:
     def _prune_backups(self, path: str) -> None:
         try:
             backups = sorted(glob.glob(f"{path}{BACKUP_SUFFIX}*"))
-        except OSError:
+        except OSError as e:
+            log_exception("auth_prune_backups", e)
             return
         for old in backups[:-BACKUP_KEEP]:
             try:
                 os.remove(old)
-            except OSError:
-                pass
+            except OSError as e:
+                log_exception(f"auth_prune_backup:{old}", e)
 
     # ------------------------------------------------------------------ 切换
     def switch_to(self, key: str) -> tuple[bool, str, str]:
@@ -170,8 +199,8 @@ class AuthStore:
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except OSError:
-            pass
+        except OSError as e:
+            log_exception(f"auth_cleanup_tmp:{tmp_path}", e)
 
     @staticmethod
     def _rollback(path: str, backup_path: str | None, existed: bool) -> tuple[bool, str]:
@@ -204,8 +233,8 @@ class AuthStore:
                 try:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
-                except OSError:
-                    pass
+                except OSError as e:
+                    log_exception(f"auth_rollback_cleanup:{tmp_path}", e)
                 return AuthStore._restore_failed_msg(backup_path)
             # 核对：恢复后内容与备份一致（字节级）
             try:

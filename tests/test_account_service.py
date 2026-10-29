@@ -126,10 +126,9 @@ class AccountServiceTests(unittest.TestCase):
         store.switch_to = mock.Mock(side_effect=OSError("磁盘只读"))
         result = AccountService(store, FakeCtrl(discover=False)).switch("key-b")
         self.assertFalse(result.ok)
+        self.assertEqual(result.outcome, "unreachable")
+        self.assertEqual(result.method, "unknown")
         self.assertIn("磁盘只读", result.message)
-        self.assertIn(result.outcome,
-                      {"ok", "unaffected", "restored", "restore_failed",
-                       "denied", "unreachable", "timeout_uncertain"})
 
     def test_switch_result_fields(self):
         result = SwitchResult(True, "ok", "file", "已写入认证文件")
@@ -153,7 +152,7 @@ def _app():
     app._switching_inflight = False
     app._switch_gen = 0
     app._current_key = "key-a"
-    app._last_fetch = time.time()
+    app._last_attempt = time.time()
     app._last_mtime = 1.0
     app._last_auth_check = 0.0
     app._sticky_reason = None

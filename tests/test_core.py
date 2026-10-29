@@ -740,6 +740,60 @@ class AuthStoreTests(unittest.TestCase):
             baks = sorted(p.parent.glob("auth.json.tokenhub.bak-*"))
             self.assertEqual(len(baks), 5)
 
+    def test_auth_backup_failure_logs_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p)
+        with self._env():
+            store = AuthStore()
+            with mock.patch("auth_store.shutil.copy2", side_effect=OSError("denied")), \
+                    mock.patch("auth_store.log_exception") as log:
+                self.assertIsNone(store.backup())
+            log.assert_called_once()
+
+    def test_auth_temp_cleanup_failure_logs_diagnostic(self):
+        with mock.patch("auth_store.os.path.exists", return_value=True), \
+                mock.patch("auth_store.os.remove", side_effect=OSError("denied")), \
+                mock.patch("auth_store.log_exception") as log:
+            AuthStore._cleanup_tmp("tokenhub.tmp")
+        log.assert_called_once()
+
+    def test_auth_current_key_permission_error_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        self._write_auth(p)
+        with self._env(), mock.patch(
+                "builtins.open", side_effect=PermissionError("denied")):
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNotNone(store.last_error)
+            self.assertIn("认证文件读取失败", store.last_error)
+        with self._env():
+            store = AuthStore()
+            self.assertEqual(store.current_key(), "sk-current-key-0001")
+            self.assertIsNone(store.last_error)
+
+    def test_auth_current_key_corrupt_file_is_diagnostic(self):
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text("{not-json", encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNotNone(store.last_error)
+            self.assertIn("认证文件读取失败", store.last_error)
+
+    def test_auth_current_key_missing_file_or_field_is_not_error(self):
+        missing = Path(self.tmp.name) / "missing-auth.json"
+        with self._env():
+            store = AuthStore(str(missing))
+            self.assertIsNone(store.current_key())
+            self.assertIsNone(store.last_error)
+        p = self.home / ".local/share/opencode/auth.json"
+        p.write_text(json.dumps({"openai": {"type": "api", "key": "sk-x"}}),
+                     encoding="utf-8")
+        with self._env():
+            store = AuthStore()
+            self.assertIsNone(store.current_key())
+            self.assertIsNone(store.last_error)
+
     def test_auth_current_key_missing_file(self):
         with self._env():
             store = AuthStore()

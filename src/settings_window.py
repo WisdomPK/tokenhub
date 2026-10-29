@@ -42,6 +42,7 @@ class SettingsWindow:
         self.api = api if api is not None else ApiClient()
         self.on_save = on_save
         self.get_current_key = get_current_key
+        self._auth_read_error: Optional[str] = None
         self.window: Optional[tk.Toplevel] = None
         self.show()
 
@@ -278,16 +279,22 @@ class SettingsWindow:
                 2000, lambda: self._feedback_label.configure(text=''))
 
     def _current_key(self) -> Optional[str]:
-        """当前账号密钥：优先回调，其次读 auth.json（main 未传入时兜底）。"""
+        """当前账号密钥：读取异常记录诊断，不伪装成“未配置”。"""
+        self._auth_read_error = None
         if self.get_current_key is not None:
             try:
                 return self.get_current_key()
-            except Exception:
+            except Exception as exc:
+                self._auth_read_error = str(exc) or '认证文件读取失败'
                 return None
         try:
             from auth_store import AuthStore
-            return AuthStore().current_key()
-        except Exception:
+            store = AuthStore()
+            key = store.current_key()
+            self._auth_read_error = store.last_error
+            return key
+        except Exception as exc:
+            self._auth_read_error = str(exc) or '认证文件读取失败'
             return None
 
     def _refresh_accounts(self) -> None:
@@ -296,6 +303,10 @@ class SettingsWindow:
         c = self.colors
         bg, fg, sub = c['bg'], c['fg'], c['sub']
         current_key = self._current_key()
+        if self._auth_read_error:
+            tk.Label(self._accounts_frame, text=self._auth_read_error,
+                     font=(self.FONT, 9), bg=bg, fg=c['warn']).pack(
+                anchor='w', pady=(0, 4))
 
         accounts = list(getattr(self.config, 'accounts', []) or [])
         if not accounts:
@@ -459,8 +470,14 @@ class SettingsWindow:
         if account is None:
             return
         label = getattr(account, 'label', '') or '未命名'
-
-        if key == self._current_key():
+        current_key = self._current_key()
+        if self._auth_read_error:
+            messagebox.showwarning(
+                '无法确认当前账号',
+                f'认证文件读取失败，暂不能删除：\n{self._auth_read_error}',
+                parent=self.window)
+            return
+        if key == current_key:
             messagebox.showwarning('无法删除',
                                    f'「{label}」是当前账号，不可删除。\n请先切换到其他账号，再回来删除。',
                                    parent=self.window)

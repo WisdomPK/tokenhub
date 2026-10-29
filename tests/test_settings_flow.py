@@ -111,6 +111,22 @@ class AccountFlowTests(unittest.TestCase):
         self.assertEqual(calls, [])
         dialog.destroy.assert_not_called()
 
+    def test_current_key_error_is_recorded(self):
+        sw = _settings_window()
+        sw.get_current_key = mock.Mock(side_effect=OSError("认证文件读取失败（denied）"))
+        self.assertIsNone(sw._current_key())
+        self.assertIn("认证文件读取失败", sw._auth_read_error)
+
+    def test_delete_blocks_when_auth_read_error(self):
+        sw = _settings_window()
+        sw.get_current_key = mock.Mock(side_effect=OSError("认证文件读取失败（denied）"))
+        with mock.patch("settings_window.messagebox.showwarning") as warn, \
+                mock.patch("settings_window.messagebox.askyesno", return_value=True):
+            sw._delete_account("key-b")
+        sw.config.remove_account.assert_not_called()
+        self.assertTrue(warn.called)
+        self.assertIn("认证文件读取失败", warn.call_args[0][1])
+
 
 class SaveOptionsTests(unittest.TestCase):
 
@@ -195,19 +211,25 @@ class ConfigSavedMainTests(unittest.TestCase):
         app = object.__new__(TokenHubApp)
         app.cfg = mock.Mock()
         app.cfg.settings = {"theme": "dark"}
+        app.cfg.accounts = []
         app.refresh_state = RefreshState()
+        app._current_key = None
+        app._last_attempt = time.time()
         app.theme = mock.Mock()
         app.theme.get_colors.return_value = {"bg": "#ffffff"}
         app.win = mock.Mock()
-        app._last_fetch = time.time()
-        app._update_ui_accounts = mock.Mock()
-        app._force_refresh_now = mock.Mock()
+        events = []
+        app._update_ui_accounts = mock.Mock(
+            side_effect=lambda: events.append("accounts"))
+        app._force_refresh_now = mock.Mock(
+            side_effect=lambda: events.append("refresh"))
         app._on_config_saved()
         app.cfg.load.assert_called_once()
         app._update_ui_accounts.assert_called_once()
         app.theme.set_theme.assert_called_once_with("dark")
         app.win.apply_theme.assert_called_once_with({"bg": "#ffffff"})
         app._force_refresh_now.assert_called_once()
+        self.assertEqual(events, ["accounts", "refresh"])
 
 
 if __name__ == "__main__":

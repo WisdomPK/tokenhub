@@ -6,6 +6,7 @@ RefreshState 为纯状态（不引用 Tk）；UI 断言用 object.__new__ 注入
 
 import queue
 import sys
+import threading
 import time
 import types
 import unittest
@@ -214,7 +215,8 @@ class MainRefreshTests(unittest.TestCase):
         app = object.__new__(TokenHubApp)
         app.refresh_state = RefreshState()
         app._result_queue = queue.Queue()
-        app._last_fetch = 0.0
+        app._refresh_event = threading.Event()
+        app._last_attempt = 0.0
         app._refresh_failed = False
         app._current_key = accounts[0].key if accounts else None
         app._sticky_reason = None
@@ -233,7 +235,7 @@ class MainRefreshTests(unittest.TestCase):
         app.refresh_state.apply(0, {"k": _usage("k")}, 50.0)
         app._result_queue.put(("usage", (0, {"k": _usage("k")}, 123.0)))
         app._poll_results()
-        self.assertEqual(app._last_fetch, 123.0)
+        self.assertEqual(app._last_attempt, 123.0)
         self.assertFalse(app._refresh_failed)
         app.win.update_accounts.assert_called_once()
 
@@ -242,7 +244,7 @@ class MainRefreshTests(unittest.TestCase):
         app.refresh_state.invalidate()
         app._result_queue.put(("usage", (0, {"k": _usage("k")}, 123.0)))
         app._poll_results()
-        self.assertEqual(app._last_fetch, 0.0)
+        self.assertEqual(app._last_attempt, 0.0)
         self.assertIsNone(app.refresh_state.account("k"))
         app.win.update_accounts.assert_not_called()
 
@@ -268,6 +270,81 @@ class MainRefreshTests(unittest.TestCase):
         self.assertFalse(app._refresh_failed)
         self.assertEqual(app.refresh_state.views, {})
         self.assertEqual(app._identity_state_text(), "未配置")
+
+    def test_empty_refresh_clears_sticky_failure(self):
+        """删光账号后无 keys 也必须投递空结果，清除旧的刷新失败 sticky。"""
+        app = self._app()
+        app._refresh_failed = True
+        app._sticky_reason = "auto"
+        app._sticky_auto_text = "刷新失败，显示上次数据 · 点击重试"
+        app._refresh_once()
+        kind, payload = app._result_queue.get_nowait()
+        self.assertEqual(kind, "usage")
+        _revision, usages, _attempted = payload
+        self.assertEqual(usages, {})
+        app._result_queue.put((kind, payload))
+        app._poll_results()
+        self.assertFalse(app._refresh_failed)
+        self.assertIsNone(app._sticky_reason)
+        app.win.clear_transient.assert_called_once()
+        self.assertEqual(app.refresh_state.views, {})
+        self.assertEqual(app._identity_state_text(), "未配置")
+
+    def test_delete_last_account_clears_failure_immediately(self):
+        account = types.SimpleNamespace(key="old", label="旧账号")
+        app = self._app()
+        app.cfg.accounts = [account]
+        app._refresh_failed = True
+        app._sticky_reason = "auto"
+        app._sticky_auto_text = "刷新失败，显示上次数据 · 点击重试"
+
+        def remove(_key):
+            app.cfg.accounts = []
+            return True
+
+        app.cfg.remove_account.side_effect = remove
+        app._current_key = None
+        result = app.on_delete_account("old")
+        self.assertEqual(result, (True, ""))
+        self.assertFalse(app._refresh_failed)
+        self.assertIsNone(app._sticky_reason)
+        self.assertTrue(app._refresh_event.is_set())
+
+    def test_auth_read_error_sets_sticky_and_is_not_unconfigured(self):
+        app = self._app()
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "auth.json 读取失败（PermissionError）"
+        app._reload_current_state()
+        self.assertEqual(app._identity_state_text(), "认证文件读取失败")
+        self.assertEqual(app._sticky_reason, "auth")
+        args, kwargs = app.win.set_toast.call_args
+        self.assertIn("认证文件读取失败", args[0])
+        self.assertTrue(kwargs.get("sticky"))
+        app.cfg.ensure_current_in_pool.assert_not_called()
+
+    def test_auth_read_error_clears_after_successful_read(self):
+        account = types.SimpleNamespace(key="k", label="账号")
+        app = self._app(accounts=(account,))
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "auth.json 读取失败（denied）"
+        app._reload_current_state()
+        self.assertEqual(app._sticky_reason, "auth")
+        app.store.current_key.return_value = "k"
+        app.store.last_error = None
+        app._reload_current_state()
+        self.assertIsNone(app._sticky_reason)
+        app.win.clear_transient.assert_called_once()
+        self.assertEqual(app._identity_state_text(), "已配置")
+
+    def test_settings_current_key_helper_raises_on_auth_error(self):
+        app = self._app()
+        app.store = mock.Mock()
+        app.store.current_key.return_value = None
+        app.store.last_error = "denied"
+        with self.assertRaises(OSError):
+            app._settings_current_key()
 
     def test_update_ui_accounts_passes_views_and_keeps_old_backup(self):
         old = types.SimpleNamespace(key="old", label="旧账号")
