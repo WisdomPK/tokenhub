@@ -17,9 +17,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -232,6 +234,164 @@ writeFileSync(rB4, "{broken json");
 r = restoreFn(rT4, rB4, true);
 assert.equal(r.ok, false, "备份不可解析应失败");
 assert.equal(existsSync(rB4), true, "不可解析备份保留");
+
+// 8. resolveOpencodeAuthPath(override)：显式配置 → 显式环境路径 → 自动发现
+const resolveAuth = hooks._tokenhubResolveAuthPath;
+assert.equal(typeof resolveAuth, "function", "hooks 应暴露 _tokenhubResolveAuthPath");
+const savedAuthEnv = process.env.OPENCODE_AUTH_PATH;
+const savedXdg = process.env.XDG_DATA_HOME;
+const xdgDir = join(tmp, "xdg");
+const defaultAuth = join(xdgDir, "opencode", "auth.json");
+mkdirSync(dirname(defaultAuth), { recursive: true });
+const defaultBytes = JSON.stringify(
+  { "opencode-go": { type: "api", key: "sk-default" }, other: { type: "api", key: "x" } },
+  null,
+  2,
+);
+writeFileSync(defaultAuth, defaultBytes);
+
+function backupsOf(target) {
+  const prefix = target.split(/[\\/]/).pop() + ".tokenhub.bak-";
+  return readdirSync(dirname(target)).filter((n) => n.startsWith(prefix));
+}
+
+async function startHub(extra) {
+  const h = await TokenHub({
+    serverUrl: new URL("http://127.0.0.1:1/"), // 不可达 → 走文件分支
+    directory: tmp,
+    ...extra,
+  });
+  const c = h._tokenhubControl;
+  return {
+    hooks: h,
+    switch: async (key) => {
+      const res = await fetch(`http://127.0.0.1:${c.port}/switch`, {
+        method: "POST",
+        headers: { "X-TokenHub-Token": c.token, "content-type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      return { status: res.status, body: await res.json() };
+    },
+  };
+}
+
+function startSilentStub(onRequest) {
+  const server = createServer(() => {
+    onRequest();
+    // 故意不响应：模拟宿主 API 已接收请求但超时
+  });
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/`,
+        close: () =>
+          new Promise((done) => {
+            server.closeAllConnections();
+            server.close(() => done());
+          }),
+      });
+    });
+  });
+}
+
+// 8a. override 不存在但默认文件存在：只会在 override 新建，默认文件字节不变
+delete process.env.OPENCODE_AUTH_PATH;
+process.env.XDG_DATA_HOME = xdgDir;
+assert.equal(resolveAuth(), defaultAuth, "无 override/env 时应自动发现默认文件");
+const overrideMissing = join(tmp, "override-missing", "auth.json");
+assert.equal(resolveAuth(overrideMissing), overrideMissing, "override 缺失时仍应唯一指向 override");
+const hub8a = await startHub({ authPath: overrideMissing });
+const r8a = await hub8a.switch("sk-override-created");
+assert.equal(r8a.status, 200);
+assert.equal(r8a.body.ok, true);
+assert.equal(r8a.body.method, "file");
+assert.equal(
+  JSON.parse(readFileSync(overrideMissing, "utf8"))["opencode-go"].key,
+  "sk-override-created",
+  "override 不存在时应按明确目标新建",
+);
+assert.equal(readFileSync(defaultAuth, "utf8"), defaultBytes, "显式 override 写入不得改动默认文件");
+await hub8a.hooks.dispose();
+
+// 8b. override 损坏但默认文件有效：明确报错，两个文件字节都不变
+const overrideCorrupt = join(tmp, "override-corrupt", "auth.json");
+mkdirSync(dirname(overrideCorrupt), { recursive: true });
+const corruptBytes = "{broken json";
+writeFileSync(overrideCorrupt, corruptBytes);
+const hub8b = await startHub({ authPath: overrideCorrupt });
+const r8b = await hub8b.switch("sk-override-corrupt");
+assert.equal(r8b.status, 200);
+assert.equal(r8b.body.ok, false, "损坏的显式目标不得静默改用默认文件");
+assert.ok(String(r8b.body.error).includes("读取 auth.json 失败"), "应明确报告显式目标读取失败");
+assert.equal(readFileSync(overrideCorrupt, "utf8"), corruptBytes, "损坏的显式目标不得被覆盖");
+assert.equal(readFileSync(defaultAuth, "utf8"), defaultBytes, "显式目标损坏时默认文件不变");
+await hub8b.hooks.dispose();
+
+// 8c. 环境显式路径优先于自动发现；显式配置又优先于环境路径
+const envMissing = join(tmp, "env-explicit", "auth.json");
+process.env.OPENCODE_AUTH_PATH = envMissing;
+assert.equal(resolveAuth(), envMissing, "环境显式路径即使不存在也不得回退默认文件");
+assert.equal(resolveAuth(overrideMissing), overrideMissing, "显式配置应优先于环境路径");
+const hub8c = await startHub({});
+const r8c = await hub8c.switch("sk-env-created");
+assert.equal(r8c.body.ok, true);
+assert.equal(r8c.body.method, "file");
+assert.equal(
+  JSON.parse(readFileSync(envMissing, "utf8"))["opencode-go"].key,
+  "sk-env-created",
+  "环境显式路径不存在时应按该目标新建",
+);
+assert.equal(readFileSync(defaultAuth, "utf8"), defaultBytes, "环境显式路径写入不得改动默认文件");
+await hub8c.hooks.dispose();
+process.env.OPENCODE_AUTH_PATH = savedAuthEnv;
+
+// 9. timeout 且宿主已写入目标 key → 核对文件确认成功，不再次写文件
+const timeoutWrittenAuth = join(tmp, "timeout-written", "auth.json");
+mkdirSync(dirname(timeoutWrittenAuth), { recursive: true });
+writeFileSync(
+  timeoutWrittenAuth,
+  JSON.stringify({ "opencode-go": { type: "api", key: "sk-timeout-old" }, other: 1 }),
+);
+const stubBytes = JSON.stringify({
+  "opencode-go": { type: "api", key: "sk-timeout-written" },
+  stub: "written",
+});
+const stubWritten = await startSilentStub(() => writeFileSync(timeoutWrittenAuth, stubBytes));
+const hub9 = await startHub({ serverUrl: new URL(stubWritten.url), authPath: timeoutWrittenAuth });
+const started9 = Date.now();
+const r9 = await hub9.switch("sk-timeout-written");
+assert.ok(Date.now() - started9 >= 2500, "应实际观察到宿主 API 超时");
+assert.equal(r9.body.ok, true, "文件已含目标 key 时超时应升级为成功");
+assert.equal(r9.body.method, "api");
+assert.equal(r9.body.verified, "auth-file");
+assert.equal(readFileSync(timeoutWrittenAuth, "utf8"), stubBytes, "超时确认后不得再次写文件");
+assert.deepEqual(backupsOf(timeoutWrittenAuth), [], "超时确认后不得产生备份/直写副作用");
+await hub9.hooks.dispose();
+await stubWritten.close();
+
+// 10. timeout 且宿主未写入 → uncertain，保留原文件且不盲目直写
+const timeoutPendingAuth = join(tmp, "timeout-pending", "auth.json");
+mkdirSync(dirname(timeoutPendingAuth), { recursive: true });
+const pendingBytes = JSON.stringify({ "opencode-go": { type: "api", key: "sk-timeout-old" } });
+writeFileSync(timeoutPendingAuth, pendingBytes);
+const stubPending = await startSilentStub(() => {});
+const hub10 = await startHub({ serverUrl: new URL(stubPending.url), authPath: timeoutPendingAuth });
+const started10 = Date.now();
+const r10 = await hub10.switch("sk-timeout-pending");
+assert.ok(Date.now() - started10 >= 2500, "应实际观察到宿主 API 超时");
+assert.equal(r10.body.ok, false, "无法确认超时结果时不得报成功");
+assert.equal(r10.body.uncertain, true);
+assert.equal(r10.body.status, "timeout_uncertain");
+assert.ok(String(r10.body.error).includes("未再次写入"), "应明确说明未再次写文件");
+assert.equal(readFileSync(timeoutPendingAuth, "utf8"), pendingBytes, "超时未确认时不得直写文件");
+assert.deepEqual(backupsOf(timeoutPendingAuth), [], "超时未确认时不得产生备份");
+await hub10.hooks.dispose();
+await stubPending.close();
+
+if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+else process.env.XDG_DATA_HOME = savedXdg;
 
 rmSync(tmp, { recursive: true, force: true });
 console.log("SMOKE TEST ALL PASS");
