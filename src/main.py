@@ -22,6 +22,7 @@ import time
 
 import tkinter as tk
 
+from account_service import AccountService, SwitchResult
 from api import AccountUsage, ApiClient, UsageMetric, WINDOW_NAMES
 from auth_store import AuthStore
 from config import Account, Config, ConfigWriteBlocked
@@ -68,6 +69,7 @@ class TokenHubApp:
         self.store = AuthStore()
         self.api = ApiClient()
         self.ctrl = ControlClient()
+        self.account_service = AccountService(self.store, self.ctrl)
         self.tracker = WindowTracker()
         self.theme = ThemeManager(choice=self.cfg.settings.get("theme", "auto"))
         colors = self.theme.get_colors()
@@ -113,6 +115,9 @@ class TokenHubApp:
         # TH-07：切换线程化状态
         self._switching_inflight = False   # 一次只允许一个切换在途
         self._switch_gen = 0               # 代际计数：丢弃过期切换结果
+        # 运行时生效语义：本进程切换成功 → 待重启；外部 auth 变化 → 未确认
+        self._switch_pending_restart = False
+        self._auth_external_changed = False
         # 可见状态统一：托盘手动显示/隐藏（手动显示后不随鼠标离开收起）
         self._manual_visible = False
         # TH-08c：倒计时归零去抖（key → 上次触发强制刷新时刻）
@@ -457,6 +462,10 @@ class TokenHubApp:
         if mtime == self._last_mtime:
             return
         self._last_mtime = mtime
+        if not self._switching_inflight:
+            # 外部写入 auth 文件：无法推断运行时实际账号，只能保守标注未确认
+            self._auth_external_changed = True
+            self._switch_pending_restart = False
         self._reload_current_state()
 
     def _reload_current_state(self):
@@ -477,8 +486,19 @@ class TokenHubApp:
         current_usage = self._usage_from_views(key) if key else None
         backups = [(a, self._usage_from_views(a.key))
                    for a in self.cfg.accounts if a.key != key]
+        self.win.set_identity_state(self._identity_state_text())
         self.win.update_accounts(account, current_usage, backups,
                                  views=self.refresh_state.views)
+
+    def _identity_state_text(self) -> str:
+        """区分“文件已配置”和“运行时已确认生效”；无宿主证据时不伪造。"""
+        if self._auth_external_changed:
+            return "配置已变更，运行时账号未确认"
+        if self._switch_pending_restart:
+            return "已配置，待重启"
+        if not self.cfg.accounts and not self._current_key:
+            return "未配置"
+        return "已配置"
 
     def _usage_from_views(self, key: str) -> AccountUsage | None:
         """把窗口级视图合成为 FloatingWindow 消费的 AccountUsage（旧值也保留）。"""
@@ -577,70 +597,56 @@ class TokenHubApp:
         self.win.set_switching(key)  # 立即禁用全部切换按钮并显示「切换中…」
 
         def work():
-            ok = False
-            message = ""
-            status = ""
             try:
-                info = self.ctrl.discover()
-                if info is not None and self.ctrl.health(info):
-                    ok, message, status = self.ctrl.switch(info, key)
-                else:
-                    ok, message, status = self.store.switch_to(key)
-            except Exception as e:
-                message = f"切换失败（{e}）"
+                result = self.account_service.switch(key)
+            except Exception as e:  # 服务契约不抛异常；此处仅防御装配故障
                 log_exception("switch", e)
-            self._result_queue.put(("switch_result", (gen, key, label, ok, message, status)))
+                result = SwitchResult(False, "unreachable", "unknown",
+                                      f"切换失败（{e}）")
+            self._result_queue.put(("switch_result", (gen, key, label, result)))
 
         threading.Thread(target=work, daemon=True, name="tokenhub-switch").start()
 
     def _handle_switch_result(self, gen: int, key: str, label: str,
-                              ok: bool, message: str, status: str):
+                              result: SwitchResult):
         """主线程处理切换结果：过期代际直接丢弃；完成/失败均恢复可操作状态。
 
-        R2-02：仅对明确的"不确定结果"（timeout_uncertain）执行核对并可能升级为
-        成功；restore_failed 等其他失败一律原样 error——不得成功升级、
-        不得附着"已核对"（恢复失败时目标密钥残留恰是失败结果，不能误报生效）。
-        U09：成功文案不再过度承诺"新请求即时生效"；切换方式由 control 层消息
-        （切换请求已成功/认证文件已更新/已完成）透传。
-        U02：restore_failed 与 timeout_uncertain 核对未生效 → sticky error
-        （需要用户处理的状态持续可见，保留原错误+备份信息）。
+        决策依据为 SwitchResult.outcome（不解析 message）；只区分展示方式。
+        超时核对/恢复失败残留判定已在 AccountService 内完成，UI 不二次升级。
         """
         if gen != self._switch_gen:
             return  # 过期结果（更早一次切换产生）：不触碰当前状态
         self._switching_inflight = False
         self.win.set_switching(None)  # 恢复全部切换按钮
-        if ok:
-            # 用户要求：切换成功后追加「请重启 opencode」提示（3 秒），
-            # 经 follow_up 由 UI 契约在第一段淡出后自动显示
+        if result.ok:
+            # 本进程切换成功 = 配置已写入，但运行时仍需重启 opencode 才确认生效
+            self._switch_pending_restart = True
+            self._auth_external_changed = False
             self.win.set_toast(
-                f"已切换至「{label}」：{message}", "success",
+                f"已切换至「{label}」：{result.message}", "success",
                 follow_up=("请重启 opencode", 3000))
-        elif status == "timeout_uncertain":
-            # 仅超时待确认允许核对 auth.json 实际账号后给最终状态
+        elif result.outcome == "timeout_uncertain":
             current = None
             try:
                 current = self.store.current_key()
             except Exception as e:
                 log_exception("switch_verify", e)
-            if current == key:
-                self.win.set_toast(
-                    f"已切换至「{label}」：已核对文件中的目标账号", "success",
-                    follow_up=("请重启 opencode", 3000))
-            elif current:
+            if current:
                 account = self.cfg.find_by_key(current)
                 cur_label = account.label if account else Config.mask_key(current)
                 self._set_sticky(
                     "switch",
-                    f"{message}；已核对：当前账号仍为「{cur_label}」", "error")
+                    f"{result.message}；已核对：当前账号仍为「{cur_label}」", "error")
             else:
-                self._set_sticky("switch", message, "error")
-        elif status == "restore_failed":
+                self._set_sticky("switch", result.message, "error")
+        elif result.outcome == "restore_failed":
             # U02：恢复失败保留原错误+备份信息，持续可见
-            self._set_sticky("switch", message, "error")
+            self._set_sticky("switch", result.message, "error")
         else:
             # restored/unaffected/denied/unreachable/未知：原样 error（普通 toast）
-            self.win.set_toast(message, "error")
+            self.win.set_toast(result.message, "error")
         self._reload_current_state()  # 立即重读当前账号刷新 UI
+        self._last_mtime = self.store.mtime()
         self._maybe_refresh_now()
 
     def on_refresh(self):

@@ -182,6 +182,7 @@ class FloatingWindow:
         # 数据
         self._data = (None, None, [])
         self._views: dict = {}   # RefreshState.views（key → 窗口 → WindowView）
+        self._identity_state = '已配置'  # 当前账号 chip：区分已配置/待重启/未确认
         self._switching_key: Optional[str] = None
         self._active_dialog: Optional[object] = None  # 活动模态弹窗（preview 驱动用）
         self._add_validator: Optional[Callable[[str], Optional[str]]] = None  # 可注入假校验器
@@ -372,8 +373,9 @@ class FloatingWindow:
                  fg=self.c['offline'] if offline else self.c['fg']).pack(
             side=tk.LEFT, padx=(4, 0))
         if is_current:
-            # U01：当前账号「使用中」chip（accent 弱底小标签）
-            tk.Label(inner, text='使用中', font=(self.FONT, 8), bg=self.c['card'],
+            # U01：当前账号状态 chip；不把“文件已配置”说成运行时“使用中”
+            tk.Label(inner, text=getattr(self, '_identity_state', '已配置'),
+                     font=(self.FONT, 8), bg=self.c['card'],
                      fg=self.c['accent'], padx=4, pady=0,
                      bd=0, highlightthickness=0).pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(inner, text=self._mask(key), font=(self.FONT, 9), bg=self._trans,
@@ -704,6 +706,10 @@ class FloatingWindow:
         return self._format_countdown(getattr(m, 'resets_at', None)) == '即将重置'
 
     # ============ 数据 / 状态更新（冻结接口） ============
+
+    def set_identity_state(self, text: str) -> None:
+        """当前账号状态 chip 文案（已配置 / 已配置，待重启 / 配置已变更…）。"""
+        self._identity_state = text or '已配置'
 
     def update_accounts(self, current, current_usage, backups, views=None) -> None:
         """刷新面板数据。backups: list[tuple[Account, AccountUsage | None]]。

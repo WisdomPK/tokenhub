@@ -19,6 +19,7 @@ from main import TokenHubApp  # noqa: E402
 from floating_window import FloatingWindow  # noqa: E402
 from config import ConfigWriteBlocked  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
+from account_service import AccountService, SwitchResult  # noqa: E402
 
 
 def _bare_app() -> TokenHubApp:
@@ -40,6 +41,10 @@ def _bare_app() -> TokenHubApp:
     app._sticky_auto_text = None
     app._refresh_failed = False
     app._last_auto_check = 0.0
+    # W7：运行时生效语义字段
+    app._switch_pending_restart = False
+    app._auth_external_changed = False
+    app._last_mtime = 0.0
     return app
 
 
@@ -86,6 +91,7 @@ class SwitchThreadingTests(unittest.TestCase):
         app.store.switch_to.return_value = (True, '直写文件', 'ok')
         app.ctrl = mock.Mock()
         app.ctrl.discover.return_value = None  # 强制走直写降级路径
+        app.account_service = AccountService(app.store, app.ctrl)
         app._current_key = 'key-a'
         return app
 
@@ -109,13 +115,13 @@ class SwitchThreadingTests(unittest.TestCase):
 
         kind, payload = app._result_queue.get(timeout=5)
         self.assertEqual(kind, 'switch_result')
-        gen, key, label, ok, message, status = payload
-        self.assertEqual((gen, key, ok, message, status),
+        gen, key, label, result = payload
+        self.assertEqual((gen, key, result.ok, result.message, result.outcome),
                          (1, 'key-b', True, '直写文件', 'ok'))
         self.assertTrue(seen_threads)  # 实际切换发生在后台线程
         self.assertNotEqual(seen_threads[0], main_thread_id)
 
-        app._handle_switch_result(gen, key, label, ok, message, status)
+        app._handle_switch_result(gen, key, label, result)
         self.assertFalse(app._switching_inflight)
         app.win.set_switching.assert_called_with(None)
         app.win.set_toast.assert_called_once()  # 成功 toast
@@ -135,7 +141,8 @@ class SwitchThreadingTests(unittest.TestCase):
         app = self._app()
         app._switching_inflight = True
         app._switch_gen = 2
-        app._handle_switch_result(1, 'key-b', '备用', True, 'ok', 'ok')
+        app._handle_switch_result(
+            1, 'key-b', '备用', SwitchResult(True, 'ok', 'file', 'ok'))
         self.assertTrue(app._switching_inflight)
         app.win.set_switching.assert_not_called()
         app.win.set_toast.assert_not_called()
@@ -156,7 +163,7 @@ class SwitchThreadingTests(unittest.TestCase):
         self.assertNotIn('follow_up', app.win.set_toast.call_args[1])
 
     def test_switch_timeout_but_verified_effective(self):
-        """R2-02：仅 timeout_uncertain 核对 auth.json 实际已生效 → 成功态提示（U09）。"""
+        """服务层核对超时后文件已是目标账号 → 成功态提示（U09）。"""
         app = self._app()
         app.store.switch_to.return_value = (
             False, '控制接口超时，切换结果待确认', 'timeout_uncertain')
@@ -164,6 +171,7 @@ class SwitchThreadingTests(unittest.TestCase):
         app.on_switch('key-b')
         kind, payload = app._result_queue.get(timeout=5)
         app._handle_switch_result(*payload)
+        self.assertTrue(payload[3].ok)
         app.win.set_toast.assert_called_with(
             '已切换至「备用」：已核对文件中的目标账号', 'success',
             follow_up=('请重启 opencode', 3000))
@@ -489,7 +497,8 @@ class SwitchResultStatusTests(unittest.TestCase):
     def _finish(self, app, ok, message, status, key='key-b', label='备用'):
         app._switching_inflight = True
         app._switch_gen = 3
-        app._handle_switch_result(3, key, label, ok, message, status)
+        app._handle_switch_result(
+            3, key, label, SwitchResult(ok, status, 'file', message))
 
     def test_ok_success_includes_switch_method(self):
         """U09：成功提示透传切换方式消息 + follow_up「请重启 opencode」（3 秒）。"""
@@ -510,14 +519,14 @@ class SwitchResultStatusTests(unittest.TestCase):
         self.assertNotIn('立即', text)
         self.assertEqual(kwargs.get('follow_up'), ('请重启 opencode', 3000))
 
-    def test_timeout_uncertain_target_current_upgrades_to_success(self):
-        """超时待确认 + 核对 current==target → 成功（唯一允许升级的失败态）。"""
+    def test_confirmed_timeout_result_shows_success(self):
+        """超时核对由 AccountService 完成；主线程只按结构化结果展示。"""
         app = self._app()
-        app.store.current_key.return_value = 'key-b'
-        self._finish(app, False, '控制接口超时，切换结果待确认', 'timeout_uncertain')
+        self._finish(app, True, '已核对文件中的目标账号', 'ok')
         app.win.set_toast.assert_called_once_with(
             '已切换至「备用」：已核对文件中的目标账号', 'success',
             follow_up=('请重启 opencode', 3000))
+        self.assertTrue(app._switch_pending_restart)
 
     def test_timeout_uncertain_other_current_stays_error_with_check(self):
         app = self._app()

@@ -218,6 +218,8 @@ class MainRefreshTests(unittest.TestCase):
         app._current_key = accounts[0].key if accounts else None
         app._sticky_reason = None
         app._sticky_auto_text = None
+        app._switch_pending_restart = False
+        app._auth_external_changed = False
         app.cfg = mock.Mock()
         app.cfg.accounts = list(accounts)
         app.cfg.find_by_key.side_effect = lambda key: next(
@@ -264,6 +266,7 @@ class MainRefreshTests(unittest.TestCase):
         app._poll_results()
         self.assertFalse(app._refresh_failed)
         self.assertEqual(app.refresh_state.views, {})
+        self.assertEqual(app._identity_state_text(), "未配置")
 
     def test_update_ui_accounts_passes_views_and_keeps_old_backup(self):
         old = types.SimpleNamespace(key="old", label="旧账号")
