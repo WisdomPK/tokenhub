@@ -1,8 +1,8 @@
 {
-  "source_commit": "dc254d10c302c92347806e70e93b7e3d78b9119d",
+  "source_commit": "0894049b94995c6952011bc4b5f61bca4f9fb590",
   "source_dirty": false,
   "python": "3.13.12",
   "pyinstaller": "6.21.0",
-  "exe_sha256": "b2732f8d1027f4af3f978c0e70f00d0526947ce23514cbd6f3c4482c6b836f8c",
-  "built_at": "2026-10-29T04:39:29Z"
+  "exe_sha256": "f5366f55cc98261c53022f588195583abaec80b13500fd80156e63231fa9a95e",
+  "built_at": "2026-10-29T06:10:15Z"
 }

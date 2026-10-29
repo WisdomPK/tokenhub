@@ -153,6 +153,23 @@ class ResponseShapeTests(unittest.TestCase):
         self.assertIsNotNone(remaining_seconds(usage.monthly.resets_at))
         self.assertIsNone(usage_validation_error(usage))
 
+    def test_resets_at_falls_back_to_valid_legacy_field(self):
+        """R3：primary 不可解析时使用有效 legacy；primary 优先，均无效置 None。"""
+        usage = _usage_from_windows(
+            _fixture()["responses"]["resetsAt-primary-invalid"])
+        self.assertEqual(usage.rolling.resets_at, "2030-01-01T12:00:00Z")
+        self.assertIsNotNone(remaining_seconds(usage.rolling.resets_at))
+        self.assertEqual(usage.weekly.resets_at, "2030-01-02T12:00:00Z")
+        self.assertIsNotNone(remaining_seconds(usage.weekly.resets_at))
+        self.assertIsNone(usage.monthly.resets_at)
+        # 合法但已过期仍算有效，且优先于 legacy
+        expired = ApiClient._parse_metric({
+            "percent": 1,
+            "resetsAt": "2000-01-01T00:00:00Z",
+            "resets_at": "2030-01-01T00:00:00Z",
+        })
+        self.assertEqual(expired.resets_at, "2000-01-01T00:00:00Z")
+
     def test_resets_at_alias_supported(self):
         metric = ApiClient._parse_metric(
             {"percent": 1, "resets_at": "2026-11-29T12:00:00Z"})
