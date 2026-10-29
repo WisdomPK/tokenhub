@@ -23,7 +23,7 @@ import time
 import tkinter as tk
 
 from account_service import AccountService, SwitchResult
-from api import AccountUsage, ApiClient, UsageMetric, WINDOW_NAMES
+from api import AccountUsage, ApiClient, UsageMetric, WINDOW_NAMES, display_percent
 from auth_store import AuthStore
 from config import Account, Config, ConfigWriteBlocked
 from control_client import ControlClient
@@ -665,7 +665,7 @@ class TokenHubApp:
     def on_add_account(self, label: str, key: str) -> tuple[bool, str]:
         """新增账号回调（R3-03 契约）：返回 (ok, 错误消息)。
 
-        UI 已完成真实校验；空标签补默认名；写入配置（自动落盘）。
+        UI 已完成真实校验；空标签由 Config 生成唯一默认名，写入配置（自动落盘）。
         保存失败（含 ConfigWriteBlocked）→ (False, msg) 并保留错误 toast，
         弹窗据此保持打开、保留输入；成功 → (True, "")。
         空标签直接交给 Config.upsert_account 生成唯一默认名。
@@ -793,7 +793,7 @@ def self_test() -> int:
     ok_count = 0
     for name, metric in rows:
         if metric.percent is not None:
-            print(f"{name}: {metric.percent}% | 重置: {metric.resets_at}")
+            print(f"{name}: {display_percent(metric.percent)}% | 重置: {metric.resets_at}")
             ok_count += 1
         else:
             print(f"{name}: 离线（{metric.error}）")

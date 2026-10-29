@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from account_service import AccountService, SwitchResult  # noqa: E402
+from api import AccountUsage, UsageMetric  # noqa: E402
 from floating_window import FloatingWindow  # noqa: E402
 from main import TokenHubApp  # noqa: E402
 from refresh_state import RefreshState  # noqa: E402
@@ -257,6 +259,27 @@ class IdentityStateTests(unittest.TestCase):
         win = object.__new__(FloatingWindow)
         win.set_identity_state("已配置，待重启")
         self.assertEqual(win._identity_state, "已配置，待重启")
+
+    def test_original_account_remains_visible_after_switch(self):
+        old = types.SimpleNamespace(key="key-a", label="原账号")
+        new = types.SimpleNamespace(key="key-b", label="新账号")
+        app = _app()
+        app.cfg.accounts = [old, new]
+        app.cfg.find_by_key.side_effect = lambda key: {
+            "key-a": old, "key-b": new}.get(key)
+        app._current_key = "key-b"
+        usage = AccountUsage(
+            "key-a", UsageMetric("ok", 12.5, None),
+            UsageMetric("ok", 20, None), UsageMetric("ok", 30, None), 100.0)
+        app.refresh_state.apply(
+            app.refresh_state.revision,
+            {"key-a": usage, "key-b": usage}, 100.0)
+        app._update_ui_accounts()
+        args, kwargs = app.win.update_accounts.call_args
+        self.assertIs(args[0], new)
+        self.assertEqual([a.key for a, _u in args[2]], ["key-a"])
+        self.assertEqual(args[2][0][1].rolling.percent, 12.5)
+        self.assertIn("key-a", kwargs["views"])
 
 
 if __name__ == "__main__":
